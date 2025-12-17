@@ -1,0 +1,17 @@
+{
+  "orgName": "Accounting Seed Ramp",
+  "adminEmail": "integration@accountingseed.com",
+  "edition": "Partner Developer",
+  "hasSampleData": true,
+  "features": [
+    "EnableSetPasswordInApi"
+  ],
+  "settings": {
+    "lightningExperienceSettings": {
+      "enableS1DesktopEnabled": true
+    },
+    "mobileSettings": {
+      "enableS1EncryptedStoragePref2": false
+    }
+  }
+}

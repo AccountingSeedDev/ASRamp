@@ -1,0 +1,20 @@
+{
+  "packageDirectories": [
+    {
+      "path": "force-app",
+      "default": true,
+      "dependencies": [
+        {
+          "package": "Accounting Seed Financial Suite (1GP) @3.348"
+        }
+      ]
+    }
+  ],
+  "name": "Accounting Seed Ramp",
+  "namespace": "AcctSeedRamp",
+  "sfdcLoginUrl": "https://login.salesforce.com",
+  "sourceApiVersion": "65.0",
+  "packageAliases": {
+    "Accounting Seed Financial Suite (1GP) @3.348": "04tHo000000hdf3IAA"
+  }
+}
