@@ -1,0 +1,158 @@
+<template>
+    <lightning-card title="Ramp Integration Configuration" icon-name="custom:custom14">
+        <div class="slds-p-around_medium">
+            <!-- Alert Banner -->
+            <lightning-layout multiple-rows>
+                <lightning-layout-item size="12">
+                    <div class="slds-box slds-theme_info slds-m-bottom_medium">
+                        <p class="slds-text-body_small">
+                            Configure your Ramp API credentials here. These credentials are stored as Custom Metadata
+                            and can be deployed across environments. For security, consider using Protected Custom Metadata.
+                        </p>
+                    </div>
+                </lightning-layout-item>
+
+                <!-- Developer Name -->
+                <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                    <lightning-input
+                        label="Developer Name"
+                        value={developerName}
+                        data-field="developerName"
+                        onchange={handleInputChange}
+                        required
+                        disabled={hasExistingCredential}
+                        help="API name for this credential record">
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- Label -->
+                <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                    <lightning-input
+                        label="Label"
+                        value={label}
+                        data-field="label"
+                        onchange={handleInputChange}
+                        required>
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- Client ID -->
+                <lightning-layout-item size="12" padding="around-small">
+                    <lightning-input
+                        label="Client ID"
+                        value={clientId}
+                        data-field="clientId"
+                        onchange={handleInputChange}
+                        required
+                        help="OAuth Client ID from Ramp">
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- Client Secret -->
+                <lightning-layout-item size="12" padding="around-small">
+                    <lightning-input
+                        type="password"
+                        label="Client Secret"
+                        value={clientSecret}
+                        data-field="clientSecret"
+                        onchange={handleInputChange}
+                        required
+                        help="OAuth Client Secret from Ramp">
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- Token URL -->
+                <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                    <lightning-input
+                        label="Token URL"
+                        value={tokenUrl}
+                        data-field="tokenUrl"
+                        onchange={handleInputChange}
+                        help="OAuth token endpoint URL">
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- API Base URL -->
+                <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                    <lightning-input
+                        label="API Base URL"
+                        value={apiBaseUrl}
+                        data-field="apiBaseUrl"
+                        onchange={handleInputChange}
+                        help="Base URL for Ramp API">
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- Scopes -->
+                <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                    <lightning-input
+                        label="Scopes"
+                        value={scopes}
+                        data-field="scopes"
+                        onchange={handleInputChange}
+                        required
+                        help="OAuth scopes (required, e.g., transactions:read)">
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- Is Active -->
+                <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                    <lightning-input
+                        type="checkbox"
+                        label="Active"
+                        checked={isActive}
+                        data-field="isActive"
+                        onchange={handleInputChange}
+                        help="Enable this credential configuration">
+                    </lightning-input>
+                </lightning-layout-item>
+
+                <!-- Action Buttons -->
+                <lightning-layout-item size="12" padding="around-small">
+                    <div class="slds-button-group" role="group">
+                        <lightning-button
+                            variant="brand"
+                            label="Save Configuration"
+                            onclick={handleSave}
+                            disabled={isSaveDisabled}>
+                        </lightning-button>
+                        <lightning-button
+                            variant="neutral"
+                            label="Test Connection"
+                            onclick={handleTestConnection}
+                            disabled={isTestDisabled}>
+                        </lightning-button>
+                        <lightning-button
+                            variant="success"
+                            label="Establish Accounting Connection"
+                            onclick={handleEstablishAccountingConnection}
+                            disabled={isTestDisabled}
+                            icon-name="utility:connected_apps">
+                        </lightning-button>
+                        <lightning-button
+                            variant="neutral"
+                            label="Clear Token Cache"
+                            onclick={handleClearCache}
+                            disabled={isLoading}>
+                        </lightning-button>
+                    </div>
+                </lightning-layout-item>
+
+                <!-- Accounting Connection Status -->
+                <lightning-layout-item size="12" padding="around-small" if:true={hasExistingCredential}>
+                    <div class="slds-box slds-theme_shade slds-m-top_small">
+                        <p class="slds-text-body_small">
+                            <lightning-icon icon-name={accountingConnectionIcon} size="xx-small"></lightning-icon>
+                            <strong>Accounting Connection Status:</strong> {accountingConnectionMessage}
+                        </p>
+                    </div>
+                </lightning-layout-item>
+            </lightning-layout>
+
+            <!-- Loading Spinner -->
+            <template if:true={isLoading}>
+                <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+            </template>
+        </div>
+    </lightning-card>
+</template>

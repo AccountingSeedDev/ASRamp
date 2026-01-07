@@ -42,6 +42,9 @@ $RECYCLE.BIN/
 # Local environment variables
 .env
 
+# Custom Metadata with credentials (security)
+force-app/main/default/customMetadata/Ramp_Credential.*.md-meta.xml
+
 # Python Salesforce Functions
 **/__pycache__/
 **/.venv/
@@ -56,4 +59,3 @@ target/
 **/*.tsbuildinfo
 
 .idea
-*.iml
