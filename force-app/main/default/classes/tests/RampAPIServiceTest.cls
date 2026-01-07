@@ -86,19 +86,34 @@ private class RampAPIServiceTest {
 
     /**
      * @description Mock class for successful API response
+     * Handles both token request and API request
      */
     private class RampAPIMockSuccess implements HttpCalloutMock {
+        private Integer callCount = 0;
+
         public HttpResponse respond(HttpRequest req) {
+            callCount++;
             HttpResponse res = new HttpResponse();
-            res.setStatusCode(200);
             res.setHeader('Content-Type', 'application/json');
-            res.setBody('{"success": true}');
+
+            // First call is always for the token
+            if (callCount == 1 || req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"transactions:read"}');
+            }
+            // Subsequent calls are for the actual API
+            else {
+                res.setStatusCode(200);
+                res.setBody('{"success": true}');
+            }
+
             return res;
         }
     }
 
     /**
      * @description Mock class that returns 401 first, then 200 on retry
+     * Handles token request, 401 API response, token refresh, then success
      */
     private class RampAPIMock401ThenSuccess implements HttpCalloutMock {
         private Integer callCount = 0;
@@ -106,13 +121,26 @@ private class RampAPIServiceTest {
         public HttpResponse respond(HttpRequest req) {
             callCount++;
             HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
 
+            // First call is for initial token
             if (callCount == 1) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"transactions:read"}');
+            }
+            // Second call is the API call that returns 401
+            else if (callCount == 2) {
                 res.setStatusCode(401);
                 res.setBody('{"error": "Unauthorized"}');
-            } else {
+            }
+            // Third call is the token refresh
+            else if (callCount == 3) {
                 res.setStatusCode(200);
-                res.setHeader('Content-Type', 'application/json');
+                res.setBody('{"access_token":"new_test_token","token_type":"Bearer","expires_in":864000,"scope":"transactions:read"}');
+            }
+            // Fourth call is the retry that succeeds
+            else {
+                res.setStatusCode(200);
                 res.setBody('{"success": true}');
             }
 

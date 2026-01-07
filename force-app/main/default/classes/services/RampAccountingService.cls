@@ -22,8 +22,13 @@ public with sharing class RampAccountingService {
 
             if (res.getStatusCode() == 200 || res.getStatusCode() == 201) {
                 Map<String, Object> response = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+                String connectionId = (String) response.get('id');
+
+                // Sync custom accounting fields (GL Account Variables 1-4)
+                String fieldSyncResult = RampAccountingFieldService.syncAccountingVariablesToRamp();
+
                 return 'Accounting connection established successfully. Connection ID: ' +
-                       response.get('id');
+                       connectionId + '\n\nCustom Fields:\n' + fieldSyncResult;
             } else {
                 throw new RampAccountingException(
                     'Failed to create accounting connection. Status: ' + res.getStatusCode() +

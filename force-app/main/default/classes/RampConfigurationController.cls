@@ -123,6 +123,45 @@ public with sharing class RampConfigurationController {
     }
 
     /**
+     * @description Syncs all GL Accounts to Ramp
+     * @return String Summary of sync results
+     */
+    @AuraEnabled
+    public static String syncGLAccounts() {
+        try {
+            return RampGLAccountService.syncAllGLAccounts();
+        } catch (Exception e) {
+            throw new AuraHandledException('Error syncing GL Accounts: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Gets GL Account sync statistics
+     * @return Map<String, Integer> Statistics about sync status
+     */
+    @AuraEnabled(cacheable=true)
+    public static Map<String, Integer> getGLAccountStats() {
+        try {
+            return RampGLAccountService.getSyncStatistics();
+        } catch (Exception e) {
+            throw new AuraHandledException('Error getting GL Account stats: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Syncs Accounting Variables to Ramp as custom fields
+     * @return String Summary of sync results
+     */
+    @AuraEnabled
+    public static String syncAccountingVariables() {
+        try {
+            return RampAccountingFieldService.syncAccountingVariablesToRamp();
+        } catch (Exception e) {
+            throw new AuraHandledException('Error syncing Accounting Variables: ' + e.getMessage());
+        }
+    }
+
+    /**
      * @description Saves credential configuration
      * Note: This method provides instructions for manual deployment
      * Automated Custom Metadata deployment requires Metadata API and cannot be done directly from Apex in the UI
