@@ -219,6 +219,60 @@
                         </template>
                     </div>
                 </lightning-tab>
+
+                <!-- Accounting Variables Tab -->
+                <lightning-tab label="Custom Fields" icon-name="utility:custom_apps">
+                    <div class="slds-p-around_small">
+                        <template if:true={hasExistingCredential}>
+                            <lightning-layout multiple-rows>
+                                <lightning-layout-item size="12">
+                                    <div class="slds-box slds-theme_default">
+                                        <h3 class="slds-text-heading_small slds-m-bottom_small">Custom Accounting Fields</h3>
+                                        <p class="slds-text-body_small slds-m-bottom_medium">
+                                            Sync your Accounting Seed GL Account Variables (1-4) to Ramp as custom accounting fields.
+                                            These fields are automatically synced when you establish the accounting connection,
+                                            but you can manually re-sync if you add new accounting variables.
+                                        </p>
+
+                                        <!-- Info Box -->
+                                        <div class="slds-box slds-theme_info slds-m-bottom_medium">
+                                            <p class="slds-text-body_small">
+                                                <lightning-icon icon-name="utility:info" size="xx-small"></lightning-icon>
+                                                <strong>Mapping:</strong>
+                                            </p>
+                                            <ul class="slds-list_dotted slds-m-left_large slds-text-body_small">
+                                                <li>GL Account Variable 1 → Ramp Custom Field 1</li>
+                                                <li>GL Account Variable 2 → Ramp Custom Field 2</li>
+                                                <li>GL Account Variable 3 → Ramp Custom Field 3</li>
+                                                <li>GL Account Variable 4 → Ramp Custom Field 4</li>
+                                            </ul>
+                                        </div>
+
+                                        <!-- Sync Button -->
+                                        <div class="slds-text-align_center">
+                                            <lightning-button
+                                                variant="brand"
+                                                label="Sync Accounting Variables to Ramp"
+                                                onclick={handleSyncAccountingVariables}
+                                                disabled={isLoading}
+                                                icon-name="utility:sync">
+                                            </lightning-button>
+                                        </div>
+                                    </div>
+                                </lightning-layout-item>
+                            </lightning-layout>
+                        </template>
+
+                        <template if:false={hasExistingCredential}>
+                            <div class="slds-text-align_center slds-p-around_large">
+                                <lightning-icon icon-name="utility:info" size="large"></lightning-icon>
+                                <p class="slds-text-heading_small slds-m-top_medium">
+                                    Configure your authorization credentials first to access custom field sync.
+                                </p>
+                            </div>
+                        </template>
+                    </div>
+                </lightning-tab>
             </lightning-tabset>
 
             <!-- Loading Spinner -->
