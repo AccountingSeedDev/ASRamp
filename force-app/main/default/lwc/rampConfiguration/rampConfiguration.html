@@ -1,0 +1,353 @@
+<template>
+    <lightning-card title="Ramp Integration Configuration" icon-name="custom:custom14">
+        <div class="slds-p-around_medium">
+
+            <!-- Tabbed Layout -->
+            <lightning-tabset>
+                <!-- Authorization Tab -->
+                <lightning-tab label="Authorization" icon-name="utility:lock">
+                    <div class="slds-p-around_small">
+                        <lightning-layout multiple-rows>
+                            <!-- Developer Name -->
+                            <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                                <lightning-input
+                                    label="Developer Name"
+                                    value={developerName}
+                                    data-field="developerName"
+                                    onchange={handleInputChange}
+                                    required
+                                    disabled={hasExistingCredential}
+                                    help="API name for this credential record">
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- Label -->
+                            <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                                <lightning-input
+                                    label="Label"
+                                    value={label}
+                                    data-field="label"
+                                    onchange={handleInputChange}
+                                    required>
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- Client ID -->
+                            <lightning-layout-item size="12" padding="around-small">
+                                <lightning-input
+                                    label="Client ID"
+                                    value={clientId}
+                                    data-field="clientId"
+                                    onchange={handleInputChange}
+                                    required
+                                    help="OAuth Client ID from Ramp">
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- Client Secret -->
+                            <lightning-layout-item size="12" padding="around-small">
+                                <lightning-input
+                                    type="password"
+                                    label="Client Secret"
+                                    value={clientSecret}
+                                    data-field="clientSecret"
+                                    onchange={handleInputChange}
+                                    required
+                                    help="OAuth Client Secret from Ramp">
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- Token URL -->
+                            <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                                <lightning-input
+                                    label="Token URL"
+                                    value={tokenUrl}
+                                    data-field="tokenUrl"
+                                    onchange={handleInputChange}
+                                    help="OAuth token endpoint URL">
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- API Base URL -->
+                            <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                                <lightning-input
+                                    label="API Base URL"
+                                    value={apiBaseUrl}
+                                    data-field="apiBaseUrl"
+                                    onchange={handleInputChange}
+                                    help="Base URL for Ramp API">
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- Scopes -->
+                            <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                                <lightning-input
+                                    label="Scopes"
+                                    value={scopes}
+                                    data-field="scopes"
+                                    onchange={handleInputChange}
+                                    required
+                                    help="OAuth scopes (required, e.g., transactions:read)">
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- Is Active -->
+                            <lightning-layout-item size="12" medium-device-size="6" padding="around-small">
+                                <lightning-input
+                                    type="checkbox"
+                                    label="Active"
+                                    checked={isActive}
+                                    data-field="isActive"
+                                    onchange={handleInputChange}
+                                    help="Enable this credential configuration">
+                                </lightning-input>
+                            </lightning-layout-item>
+
+                            <!-- Action Buttons -->
+                            <lightning-layout-item size="12" padding="around-small">
+                                <div class="slds-button-group" role="group">
+                                    <lightning-button
+                                        variant="brand"
+                                        label="Save Configuration"
+                                        onclick={handleSave}
+                                        disabled={isSaveDisabled}>
+                                    </lightning-button>
+                                    <lightning-button
+                                        variant="neutral"
+                                        label="Test Connection"
+                                        onclick={handleTestConnection}
+                                        disabled={isTestDisabled}>
+                                    </lightning-button>
+                                    <lightning-button
+                                        variant="success"
+                                        label="Establish Accounting Connection"
+                                        onclick={handleEstablishAccountingConnection}
+                                        disabled={isTestDisabled}
+                                        icon-name="utility:connected_apps">
+                                    </lightning-button>
+                                    <lightning-button
+                                        variant="neutral"
+                                        label="Clear Token Cache"
+                                        onclick={handleClearCache}
+                                        disabled={isLoading}>
+                                    </lightning-button>
+                                </div>
+                            </lightning-layout-item>
+
+                            <!-- Accounting Connection Status -->
+                            <lightning-layout-item size="12" padding="around-small" if:true={hasExistingCredential}>
+                                <div class="slds-box slds-theme_shade slds-m-top_small">
+                                    <p class="slds-text-body_small">
+                                        <lightning-icon icon-name={accountingConnectionIcon} size="xx-small"></lightning-icon>
+                                        <strong>Accounting Connection Status:</strong> {accountingConnectionMessage}
+                                    </p>
+                                </div>
+                            </lightning-layout-item>
+                        </lightning-layout>
+                    </div>
+                </lightning-tab>
+
+                <!-- GL Accounts Tab -->
+                <lightning-tab label="GL Accounts" icon-name="utility:record">
+                    <div class="slds-p-around_small">
+                        <template if:true={hasExistingCredential}>
+                            <lightning-layout multiple-rows>
+                                <lightning-layout-item size="12">
+                                    <div class="slds-box slds-theme_default">
+                                        <p class="slds-text-body_small slds-m-bottom_small">
+                                            Sync your Accounting Seed GL Accounts to Ramp. The GL Account ID will be used as the external identifier.
+                                        </p>
+
+                                        <!-- Sync Statistics -->
+                                        <div class="slds-grid slds-gutters slds-m-bottom_medium">
+                                            <div class="slds-col">
+                                                <div class="slds-text-align_center slds-p-around_small slds-box slds-theme_shade">
+                                                    <div class="slds-text-heading_large">{glAccountStats.total}</div>
+                                                    <div class="slds-text-body_small">Total GL Accounts</div>
+                                                </div>
+                                            </div>
+                                            <div class="slds-col">
+                                                <div class="slds-text-align_center slds-p-around_small slds-box slds-theme_success">
+                                                    <div class="slds-text-heading_large">{glAccountStats.synced}</div>
+                                                    <div class="slds-text-body_small">Synced to Ramp</div>
+                                                </div>
+                                            </div>
+                                            <div class="slds-col">
+                                                <div class="slds-text-align_center slds-p-around_small slds-box slds-theme_warning">
+                                                    <div class="slds-text-heading_large">{glAccountStats.not_synced}</div>
+                                                    <div class="slds-text-body_small">Pending Sync</div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Sync Button -->
+                                        <div class="slds-text-align_center">
+                                            <lightning-button
+                                                variant="brand"
+                                                label="Sync GL Accounts to Ramp"
+                                                onclick={handleSyncGLAccounts}
+                                                disabled={isLoading}
+                                                icon-name="utility:refresh">
+                                            </lightning-button>
+                                        </div>
+
+                                        <!-- Status Message -->
+                                        <div class="slds-m-top_small">
+                                            <p class="slds-text-body_small slds-text-color_weak slds-text-align_center">
+                                                {glAccountSyncMessage}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </lightning-layout-item>
+                            </lightning-layout>
+                        </template>
+
+                        <template if:false={hasExistingCredential}>
+                            <div class="slds-text-align_center slds-p-around_large">
+                                <lightning-icon icon-name="utility:info" size="large"></lightning-icon>
+                                <p class="slds-text-heading_small slds-m-top_medium">
+                                    Configure your authorization credentials first to access GL Account sync.
+                                </p>
+                            </div>
+                        </template>
+                    </div>
+                </lightning-tab>
+
+                <!-- Custom Fields Tab -->
+                <lightning-tab label="Custom Fields" icon-name="utility:custom_apps">
+                    <div class="slds-p-around_small">
+                        <template if:true={hasExistingCredential}>
+                            <lightning-layout multiple-rows>
+                                <!-- Create Accounting Fields Section -->
+                                <lightning-layout-item size="12" class="slds-m-bottom_medium">
+                                    <div class="slds-box slds-theme_default">
+                                        <h3 class="slds-text-heading_small slds-m-bottom_small">Create Accounting Fields</h3>
+                                        <p class="slds-text-body_small slds-m-bottom_medium">
+                                            Create the GL Account Variable 1-4 custom fields in Ramp. This only needs to be done once.
+                                        </p>
+
+                                        <!-- Info Box -->
+                                        <div class="slds-box slds-theme_info slds-m-bottom_medium">
+                                            <p class="slds-text-body_small">
+                                                <lightning-icon icon-name="utility:info" size="xx-small"></lightning-icon>
+                                                <strong>Field Mapping:</strong>
+                                            </p>
+                                            <ul class="slds-list_dotted slds-m-left_large slds-text-body_small">
+                                                <li>GL Account Variable 1 → Ramp Custom Field 1</li>
+                                                <li>GL Account Variable 2 → Ramp Custom Field 2</li>
+                                                <li>GL Account Variable 3 → Ramp Custom Field 3</li>
+                                                <li>GL Account Variable 4 → Ramp Custom Field 4</li>
+                                            </ul>
+                                        </div>
+
+                                        <div class="slds-text-align_center">
+                                            <lightning-button
+                                                variant="brand"
+                                                label="Create Accounting Fields"
+                                                onclick={handleCreateAccountingFields}
+                                                disabled={isLoading}
+                                                icon-name="utility:add">
+                                            </lightning-button>
+                                        </div>
+                                    </div>
+                                </lightning-layout-item>
+
+                                <!-- Existing Custom Fields Section -->
+                                <lightning-layout-item size="12" class="slds-m-bottom_medium">
+                                    <div class="slds-box slds-theme_default">
+                                        <div class="slds-grid slds-grid_align-spread slds-m-bottom_small">
+                                            <h3 class="slds-text-heading_small">Custom Fields in Ramp</h3>
+                                            <lightning-button
+                                                variant="neutral"
+                                                label="Refresh"
+                                                onclick={handleRefreshCustomFields}
+                                                disabled={customFieldsLoading}
+                                                icon-name="utility:refresh">
+                                            </lightning-button>
+                                        </div>
+
+                                        <!-- Loading Spinner -->
+                                        <template if:true={customFieldsLoading}>
+                                            <div class="slds-align_absolute-center slds-p-around_medium">
+                                                <lightning-spinner alternative-text="Loading" size="small"></lightning-spinner>
+                                            </div>
+                                        </template>
+
+                                        <!-- Custom Fields Datatable -->
+                                        <template if:false={customFieldsLoading}>
+                                            <template if:true={hasCustomFields}>
+                                                <lightning-datatable
+                                                    key-field="ramp_id"
+                                                    data={customFields}
+                                                    columns={customFieldColumns}
+                                                    onsave={handleInlineSave}
+                                                    onrowaction={handleRowAction}
+                                                    draft-values={draftValues}
+                                                    hide-checkbox-column>
+                                                </lightning-datatable>
+                                            </template>
+
+                                            <template if:false={hasCustomFields}>
+                                                <div class="slds-text-align_center slds-p-around_medium slds-text-color_weak">
+                                                    No custom fields found in Ramp. Click "Create Accounting Fields" above to create them.
+                                                </div>
+                                            </template>
+                                        </template>
+                                    </div>
+                                </lightning-layout-item>
+
+                                <!-- Sync Variable Values Section -->
+                                <lightning-layout-item size="12">
+                                    <div class="slds-box slds-theme_default">
+                                        <h3 class="slds-text-heading_small slds-m-bottom_small">Sync Accounting Variable Values</h3>
+                                        <p class="slds-text-body_small slds-m-bottom_medium">
+                                            Sync your Accounting Seed GL Account Variable values to Ramp as field options.
+                                            This runs as a batch job and can be scheduled to run periodically.
+                                        </p>
+
+                                        <!-- Info Box -->
+                                        <div class="slds-box slds-theme_info slds-m-bottom_medium">
+                                            <p class="slds-text-body_small">
+                                                <lightning-icon icon-name="utility:info" size="xx-small"></lightning-icon>
+                                                <strong>Sync Behavior:</strong>
+                                            </p>
+                                            <ul class="slds-list_dotted slds-m-left_large slds-text-body_small">
+                                                <li>Creates new options for variables not yet synced</li>
+                                                <li>Updates existing options when variable names change</li>
+                                                <li>Uses Salesforce ID for correlation</li>
+                                            </ul>
+                                        </div>
+
+                                        <div class="slds-text-align_center">
+                                            <lightning-button
+                                                variant="brand"
+                                                label="Sync Accounting Variables to Ramp"
+                                                onclick={handleSyncAccountingVariables}
+                                                disabled={isLoading}
+                                                icon-name="utility:sync">
+                                            </lightning-button>
+                                        </div>
+                                    </div>
+                                </lightning-layout-item>
+                            </lightning-layout>
+                        </template>
+
+                        <template if:false={hasExistingCredential}>
+                            <div class="slds-text-align_center slds-p-around_large">
+                                <lightning-icon icon-name="utility:info" size="large"></lightning-icon>
+                                <p class="slds-text-heading_small slds-m-top_medium">
+                                    Configure your authorization credentials first to access custom field management.
+                                </p>
+                            </div>
+                        </template>
+                    </div>
+                </lightning-tab>
+            </lightning-tabset>
+
+            <!-- Loading Spinner -->
+            <template if:true={isLoading}>
+                <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+            </template>
+        </div>
+    </lightning-card>
+</template>

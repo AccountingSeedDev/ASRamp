@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Ramp_Vendor_Id__c</fullName>
+    <description>Stores the Ramp vendor ID (ramp_id) returned when this Account is synced to Ramp as a vendor.</description>
+    <externalId>true</externalId>
+    <label>Ramp Vendor Id</label>
+    <length>50</length>
+    <required>false</required>
+    <trackFeedHistory>false</trackFeedHistory>
+    <trackTrending>false</trackTrending>
+    <type>Text</type>
+    <unique>false</unique>
+</CustomField>
