@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Scopes__c</fullName>
-    <defaultValue>"transactions:read accounting:write"</defaultValue>
+    <defaultValue>&quot;transactions:read accounting:write&quot;</defaultValue>
     <externalId>false</externalId>
     <fieldManageability>DeveloperControlled</fieldManageability>
     <label>Scopes</label>

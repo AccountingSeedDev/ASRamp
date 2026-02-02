@@ -75,12 +75,19 @@ public with sharing class RampAPIService {
             req.setBody(body);
         }
 
+        system.debug('get endpoint: ' + req.getEndpoint());
+        system.debug('get method: ' + req.getMethod());
+        system.debug('get body: ' + req.getBody());
+
         // Send request
         Http http = new Http();
         HttpResponse res;
 
         try {
             res = http.send(req);
+            system.debug('resp: ' + res.getStatusCode());
+            system.debug('resp status: ' + res.getStatus());
+            system.debug('resp body: ' + res.getBody());
         } catch (Exception e) {
             throw new RampAPIException('API request failed: ' + e.getMessage(), e);
         }

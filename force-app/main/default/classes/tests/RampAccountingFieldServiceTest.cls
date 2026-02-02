@@ -4,77 +4,24 @@
 @IsTest
 private class RampAccountingFieldServiceTest {
 
-    @TestSetup
-    static void setup() {
-        // Create test Accounting Variables for GL Account Variable 1
-        List<AcctSeed__Accounting_Variable__c> variables = new List<AcctSeed__Accounting_Variable__c>();
-
-        variables.add(new AcctSeed__Accounting_Variable__c(
-            Name = 'Department A',
-            AcctSeed__Type__c = 'GL Account Variable 1',
-            AcctSeed__Active__c = true
-        ));
-
-        variables.add(new AcctSeed__Accounting_Variable__c(
-            Name = 'Department B',
-            AcctSeed__Type__c = 'GL Account Variable 1',
-            AcctSeed__Active__c = true
-        ));
-
-        variables.add(new AcctSeed__Accounting_Variable__c(
-            Name = 'Location A',
-            AcctSeed__Type__c = 'GL Account Variable 2',
-            AcctSeed__Active__c = true
-        ));
-
-        variables.add(new AcctSeed__Accounting_Variable__c(
-            Name = 'Location B',
-            AcctSeed__Type__c = 'GL Account Variable 2',
-            AcctSeed__Active__c = true
-        ));
-
-        // Inactive variable - should not be synced
-        variables.add(new AcctSeed__Accounting_Variable__c(
-            Name = 'Inactive Dept',
-            AcctSeed__Type__c = 'GL Account Variable 1',
-            AcctSeed__Active__c = false
-        ));
-
-        insert variables;
-    }
+    private static final String TEST_CONNECTION_ID = 'test-connection-12345678-1234-1234-1234-123456789012';
 
     @IsTest
     static void testSyncAccountingVariablesToRamp_Success() {
-        // Setup mock responses
         Test.startTest();
         Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockSuccess());
 
-        // Execute
-        String result = RampAccountingFieldService.syncAccountingVariablesToRamp();
+        String result = RampAccountingFieldService.syncAccountingVariablesToRamp(TEST_CONNECTION_ID);
 
         Test.stopTest();
 
-        // Verify
+        // Verify all 4 fields were created
         System.assertNotEquals(null, result, 'Result should not be null');
         System.assert(result.contains('GL Account Variable 1'), 'Result should mention Variable 1');
         System.assert(result.contains('GL Account Variable 2'), 'Result should mention Variable 2');
-    }
-
-    @IsTest
-    static void testSyncVariableType_WithNoVariables() {
-        // Delete all variables
-        delete [SELECT Id FROM AcctSeed__Accounting_Variable__c];
-
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockSuccess());
-
-        String result = RampAccountingFieldService.syncAccountingVariablesToRamp();
-
-        Test.stopTest();
-
-        // Verify - should handle empty variables gracefully
-        System.assertNotEquals(null, result, 'Result should not be null');
-        System.assert(result.contains('No active variables'), 'Should report no active variables');
+        System.assert(result.contains('GL Account Variable 3'), 'Result should mention Variable 3');
+        System.assert(result.contains('GL Account Variable 4'), 'Result should mention Variable 4');
+        System.assert(result.contains('Created'), 'Result should indicate fields were created');
     }
 
     @IsTest
@@ -83,7 +30,7 @@ private class RampAccountingFieldServiceTest {
         Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockError());
 
         try {
-            RampAccountingFieldService.syncAccountingVariablesToRamp();
+            RampAccountingFieldService.syncAccountingVariablesToRamp(TEST_CONNECTION_ID);
             System.assert(false, 'Should have thrown exception');
         } catch (RampAccountingFieldService.RampAccountingFieldException e) {
             System.assert(e.getMessage().contains('Error'), 'Exception should contain error message');
@@ -92,8 +39,32 @@ private class RampAccountingFieldServiceTest {
         Test.stopTest();
     }
 
+    @IsTest
+    static void testGetCustomFields() {
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockSuccess());
+
+        String result = RampAccountingFieldService.getCustomFields();
+
+        Test.stopTest();
+
+        System.assert(result.contains('Status: 200'), 'Should return status 200');
+    }
+
+    @IsTest
+    static void testDeleteCustomField() {
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockDelete());
+
+        String result = RampAccountingFieldService.deleteCustomField('test-field-id');
+
+        Test.stopTest();
+
+        System.assert(result.contains('Status: 204'), 'Should return status 204');
+    }
+
     /**
-     * Mock HTTP callout for successful responses
+     * Mock HTTP callout for successful field creation
      */
     private class RampAccountingFieldMockSuccess implements HttpCalloutMock {
         private Integer callCount = 0;
@@ -102,18 +73,29 @@ private class RampAccountingFieldServiceTest {
             HTTPResponse res = new HTTPResponse();
             res.setHeader('Content-Type', 'application/json');
 
-            // Alternate between field creation and option upload
-            if (req.getEndpoint().contains('/accounting/fields') &&
-                !req.getEndpoint().contains('field-options')) {
+            if (req.getMethod() == 'POST') {
                 // Create field response
                 res.setStatusCode(201);
                 res.setBody('{"id": "field_' + callCount++ + '", "name": "Test Field"}');
-            } else if (req.getEndpoint().contains('/accounting/field-options')) {
-                // Upload options response
-                res.setStatusCode(201);
-                res.setBody('[{"id": "option_1", "name": "Option 1"}]');
+            } else if (req.getMethod() == 'GET') {
+                // Get fields response
+                res.setStatusCode(200);
+                res.setBody('{"data": []}');
             }
 
+            return res;
+        }
+    }
+
+    /**
+     * Mock HTTP callout for delete response
+     */
+    private class RampAccountingFieldMockDelete implements HttpCalloutMock {
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+            res.setStatusCode(204);
+            res.setBody('');
             return res;
         }
     }

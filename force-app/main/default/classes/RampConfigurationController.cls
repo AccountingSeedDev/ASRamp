@@ -149,16 +149,101 @@ public with sharing class RampConfigurationController {
     }
 
     /**
-     * @description Syncs Accounting Variables to Ramp as custom fields
-     * @return String Summary of sync results
+     * @description Creates the GL Account Variable 1-4 custom fields in Ramp
+     * @return String Summary of field creation results
+     */
+    @AuraEnabled
+    public static String createAccountingFields() {
+        try {
+            // Get the accounting connection ID first
+            Map<String, Object> connection = RampAccountingService.getAccountingConnection();
+            String connectionId = (String) connection.get('id');
+
+            if (String.isBlank(connectionId)) {
+                throw new AuraHandledException('No accounting connection found. Please establish a connection first.');
+            }
+
+            return RampAccountingFieldService.syncAccountingVariablesToRamp(connectionId);
+        } catch (Exception e) {
+            throw new AuraHandledException('Error creating Accounting Fields: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Kicks off batch job to sync Accounting Variable values to Ramp field options
+     * @return String Job ID and status message
      */
     @AuraEnabled
     public static String syncAccountingVariables() {
         try {
-            return RampAccountingFieldService.syncAccountingVariablesToRamp();
+            // Get the accounting connection
+            Map<String, Object> connection = RampAccountingService.getAccountingConnection();
+            String connectionId = (String) connection.get('id');
+
+            if (String.isBlank(connectionId)) {
+                throw new AuraHandledException('No accounting connection found. Please establish a connection first.');
+            }
+
+            // Get the existing custom fields to build field name to Ramp ID map
+            Map<String, String> fieldNameToRampId = getFieldNameToRampIdMap();
+
+            if (fieldNameToRampId.isEmpty()) {
+                throw new AuraHandledException('No custom fields found in Ramp. Please create accounting fields first.');
+            }
+
+            // Start the batch job
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(connectionId, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 50);
+
+            return 'Sync job started. Job ID: ' + jobId + '\nThe job will create new options and update existing ones.';
         } catch (Exception e) {
-            throw new AuraHandledException('Error syncing Accounting Variables: ' + e.getMessage());
+            throw new AuraHandledException('Error starting sync job: ' + e.getMessage());
         }
+    }
+
+    /**
+     * @description Builds a map of field names to their Ramp IDs from existing custom fields
+     * @return Map<String, String> Field name to Ramp ID mapping
+     */
+    private static Map<String, String> getFieldNameToRampIdMap() {
+        Map<String, String> fieldMap = new Map<String, String>();
+
+        try {
+            HttpResponse res = RampAPIService.get('/developer/v1/accounting/fields');
+
+            if (res.getStatusCode() == 200) {
+                Object parsed = JSON.deserializeUntyped(res.getBody());
+                List<Object> fields;
+
+                if (parsed instanceof List<Object>) {
+                    fields = (List<Object>) parsed;
+                } else if (parsed instanceof Map<String, Object>) {
+                    Map<String, Object> responseMap = (Map<String, Object>) parsed;
+                    fields = responseMap.containsKey('data')
+                        ? (List<Object>) responseMap.get('data')
+                        : new List<Object>();
+                } else {
+                    fields = new List<Object>();
+                }
+
+                for (Object field : fields) {
+                    Map<String, Object> fieldMap2 = (Map<String, Object>) field;
+                    // Only include active fields
+                    Object isActive = fieldMap2.get('is_active');
+                    if (isActive == null || isActive == true) {
+                        String name = (String) fieldMap2.get('name');
+                        String rampId = (String) fieldMap2.get('ramp_id');
+                        if (String.isNotBlank(name) && String.isNotBlank(rampId)) {
+                            fieldMap.put(name, rampId);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.debug('Error getting field map: ' + e.getMessage());
+        }
+
+        return fieldMap;
     }
 
     /**
@@ -256,6 +341,107 @@ public with sharing class RampConfigurationController {
         xml += '</CustomMetadata>';
 
         return xml;
+    }
+
+    /**
+     * @description Retrieves all custom accounting fields from Ramp
+     * @return List<Map<String, Object>> List of custom field data
+     */
+    @AuraEnabled(cacheable=false)
+    public static List<Map<String, Object>> getRampCustomFields() {
+        try {
+            HttpResponse res = RampAPIService.get('/developer/v1/accounting/fields');
+
+            if (res.getStatusCode() == 200) {
+                Object parsed = JSON.deserializeUntyped(res.getBody());
+
+                // Handle both array and object with 'data' key
+                List<Object> fields;
+                if (parsed instanceof List<Object>) {
+                    fields = (List<Object>) parsed;
+                } else if (parsed instanceof Map<String, Object>) {
+                    Map<String, Object> responseMap = (Map<String, Object>) parsed;
+                    if (responseMap.containsKey('data')) {
+                        fields = (List<Object>) responseMap.get('data');
+                    } else {
+                        fields = new List<Object>();
+                    }
+                } else {
+                    fields = new List<Object>();
+                }
+
+                List<Map<String, Object>> result = new List<Map<String, Object>>();
+                for (Object field : fields) {
+                    Map<String, Object> fieldMap = (Map<String, Object>) field;
+                    // Filter out soft-deleted fields (is_active = false)
+                    Object isActive = fieldMap.get('is_active');
+                    if (isActive == null || isActive == true) {
+                        result.add(fieldMap);
+                    }
+                }
+                return result;
+            } else {
+                throw new AuraHandledException('Failed to retrieve custom fields. Status: ' + res.getStatusCode());
+            }
+        } catch (Exception e) {
+            throw new AuraHandledException('Error retrieving custom fields: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Updates a custom accounting field in Ramp
+     * @param fieldId The Ramp internal field ID (ramp_id from the field object)
+     * @param name The new name (optional)
+     * @param displayName The new display name (optional)
+     * @return String Success message
+     */
+    @AuraEnabled
+    public static String updateRampCustomField(String fieldId, String name, String displayName) {
+        try {
+            Map<String, Object> requestBody = new Map<String, Object>();
+
+            if (String.isNotBlank(name)) {
+                requestBody.put('name', name);
+            }
+            if (String.isNotBlank(displayName)) {
+                requestBody.put('display_name', displayName);
+            }
+
+            if (requestBody.isEmpty()) {
+                throw new AuraHandledException('At least one field (name or display_name) must be provided');
+            }
+
+            String body = JSON.serialize(requestBody);
+            HttpResponse res = RampAPIService.patch('/developer/v1/accounting/fields/' + fieldId, body);
+
+            if (res.getStatusCode() == 200) {
+                return 'Custom field updated successfully';
+            } else {
+                throw new AuraHandledException('Failed to update custom field. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody());
+            }
+        } catch (Exception e) {
+            throw new AuraHandledException('Error updating custom field: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Deletes a custom accounting field from Ramp
+     * @param rampId The Ramp internal field ID (ramp_id from the field object)
+     * @return String Success message
+     */
+    @AuraEnabled
+    public static String deleteRampCustomField(String rampId) {
+        try {
+            HttpResponse res = RampAPIService.doDelete('/developer/v1/accounting/fields/' + rampId);
+
+            if (res.getStatusCode() == 200 || res.getStatusCode() == 204) {
+                return 'Custom field deleted successfully';
+            } else {
+                throw new AuraHandledException('Failed to delete custom field. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody());
+            }
+        } catch (Exception e) {
+            throw new AuraHandledException('Error deleting custom field: ' + e.getMessage());
+        }
     }
 
     /**

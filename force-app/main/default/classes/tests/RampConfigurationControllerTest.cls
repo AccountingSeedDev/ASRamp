@@ -140,6 +140,59 @@ private class RampConfigurationControllerTest {
         System.assert(exceptionThrown, 'Should throw validation exception when Developer Name is missing');
     }
 
+    @IsTest
+    static void testCreateAccountingFields_Success() {
+        Test.setMock(HttpCalloutMock.class, new RampAccountingFieldsMock());
+
+        Test.startTest();
+        String result = RampConfigurationController.createAccountingFields();
+        Test.stopTest();
+
+        System.assertNotEquals(null, result, 'Result should not be null');
+        System.assert(result.contains('GL Account Variable'), 'Should contain field names');
+    }
+
+    @IsTest
+    static void testSyncAccountingVariables_Success() {
+        // Create test accounting variables
+        insert new AcctSeed__Accounting_Variable__c(
+            Name = 'Test Variable',
+            AcctSeed__Type__c = 'GL Account Variable 1',
+            AcctSeed__Active__c = true
+        );
+
+        Test.setMock(HttpCalloutMock.class, new RampAccountingFieldsMock());
+
+        Test.startTest();
+        String result = RampConfigurationController.syncAccountingVariables();
+        Test.stopTest();
+
+        System.assertNotEquals(null, result, 'Result should not be null');
+        System.assert(result.contains('Sync job started'), 'Should indicate batch job started');
+    }
+
+    @IsTest
+    static void testGetRampCustomFields_Success() {
+        Test.setMock(HttpCalloutMock.class, new RampCustomFieldsMock());
+
+        Test.startTest();
+        List<Map<String, Object>> result = RampConfigurationController.getRampCustomFields();
+        Test.stopTest();
+
+        System.assertNotEquals(null, result, 'Result should not be null');
+    }
+
+    @IsTest
+    static void testHasAccountingConnection_Success() {
+        Test.setMock(HttpCalloutMock.class, new RampAccountingConnectionMock());
+
+        Test.startTest();
+        Boolean result = RampConfigurationController.hasAccountingConnection();
+        Test.stopTest();
+
+        System.assertEquals(true, result, 'Should return true when connection exists');
+    }
+
     /**
      * @description Mock for successful connection test
      */
@@ -186,6 +239,74 @@ private class RampConfigurationControllerTest {
             else {
                 res.setStatusCode(401);
                 res.setBody('{"error":"invalid_client"}');
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * @description Mock for accounting fields operations
+     */
+    private class RampAccountingFieldsMock implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000}');
+            } else if (req.getEndpoint().contains('/accounting/connection')) {
+                res.setStatusCode(200);
+                res.setBody('{"id":"connection-123","remote_provider_name":"ACCOUNTING_SEED"}');
+            } else if (req.getEndpoint().contains('/accounting/fields')) {
+                if (req.getMethod() == 'POST') {
+                    res.setStatusCode(201);
+                    res.setBody('{"id":"field-123","name":"GL Account Variable 1","ramp_id":"ramp-field-123"}');
+                } else {
+                    res.setStatusCode(200);
+                    res.setBody('{"data":[{"name":"GL Account Variable 1","ramp_id":"ramp-field-123","is_active":true}]}');
+                }
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * @description Mock for custom fields retrieval
+     */
+    private class RampCustomFieldsMock implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000}');
+            } else {
+                res.setStatusCode(200);
+                res.setBody('{"data":[{"name":"Test Field","ramp_id":"ramp-123","is_active":true}]}');
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * @description Mock for accounting connection check
+     */
+    private class RampAccountingConnectionMock implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000}');
+            } else {
+                res.setStatusCode(200);
+                res.setBody('{"id":"connection-123","remote_provider_name":"ACCOUNTING_SEED"}');
             }
 
             return res;

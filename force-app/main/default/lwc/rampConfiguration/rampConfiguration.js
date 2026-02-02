@@ -8,7 +8,11 @@ import establishAccountingConnection from '@salesforce/apex/RampConfigurationCon
 import hasAccountingConnection from '@salesforce/apex/RampConfigurationController.hasAccountingConnection';
 import syncGLAccounts from '@salesforce/apex/RampConfigurationController.syncGLAccounts';
 import getGLAccountStats from '@salesforce/apex/RampConfigurationController.getGLAccountStats';
+import createAccountingFields from '@salesforce/apex/RampConfigurationController.createAccountingFields';
 import syncAccountingVariables from '@salesforce/apex/RampConfigurationController.syncAccountingVariables';
+import getRampCustomFields from '@salesforce/apex/RampConfigurationController.getRampCustomFields';
+import updateRampCustomField from '@salesforce/apex/RampConfigurationController.updateRampCustomField';
+import deleteRampCustomField from '@salesforce/apex/RampConfigurationController.deleteRampCustomField';
 
 export default class RampConfiguration extends LightningElement {
     @track developerName = 'Default';
@@ -23,6 +27,25 @@ export default class RampConfiguration extends LightningElement {
     @track hasExistingCredential = false;
     @track accountingConnectionStatus = false;
     @track glAccountStats = { total: 0, synced: 0, not_synced: 0 };
+    @track customFields = [];
+    @track customFieldsLoading = false;
+    @track draftValues = [];
+
+    customFieldColumns = [
+        { label: 'Ramp ID', fieldName: 'ramp_id', type: 'text', initialWidth: 320 },
+        { label: 'Name', fieldName: 'name', type: 'text', editable: true },
+        { label: 'Display Name', fieldName: 'display_name', type: 'text', editable: true },
+        { label: 'Input Type', fieldName: 'inputTypeLabel', type: 'text' },
+        { label: 'Created', fieldName: 'createdAtFormatted', type: 'text' },
+        {
+            type: 'action',
+            typeAttributes: {
+                rowActions: [
+                    { label: 'Delete', name: 'delete', iconName: 'utility:delete' }
+                ]
+            }
+        }
+    ];
 
     // Wire to get existing credential
     @wire(getActiveCredential)
@@ -51,6 +74,10 @@ export default class RampConfiguration extends LightningElement {
         hasAccountingConnection()
             .then(result => {
                 this.accountingConnectionStatus = result;
+                // Load custom fields if connected
+                if (result) {
+                    this.loadCustomFields();
+                }
             })
             .catch(error => {
                 console.error('Error checking accounting connection:', error);
@@ -133,11 +160,13 @@ export default class RampConfiguration extends LightningElement {
             });
     }
 
-    handleSyncAccountingVariables() {
+    handleCreateAccountingFields() {
         this.isLoading = true;
-        syncAccountingVariables()
+        createAccountingFields()
             .then(result => {
                 this.showToast('Success', result, 'success');
+                // Refresh custom fields list after creation
+                this.loadCustomFields();
             })
             .catch(error => {
                 this.showToast('Error', this.getErrorMessage(error), 'error');
@@ -145,6 +174,113 @@ export default class RampConfiguration extends LightningElement {
             .finally(() => {
                 this.isLoading = false;
             });
+    }
+
+    handleSyncAccountingVariables() {
+        this.isLoading = true;
+        syncAccountingVariables()
+            .then(result => {
+                this.showToast('Info', result, 'info');
+            })
+            .catch(error => {
+                this.showToast('Error', this.getErrorMessage(error), 'error');
+            })
+            .finally(() => {
+                this.isLoading = false;
+            });
+    }
+
+    loadCustomFields() {
+        this.customFieldsLoading = true;
+        getRampCustomFields()
+            .then(result => {
+                this.customFields = result.map(field => ({
+                    ...field,
+                    inputTypeLabel: this.formatInputType(field.input_type),
+                    createdAtFormatted: field.created_at ? new Date(field.created_at).toLocaleDateString() : '',
+                    isEditing: false
+                }));
+            })
+            .catch(error => {
+                console.error('Error loading custom fields:', error);
+                this.customFields = [];
+            })
+            .finally(() => {
+                this.customFieldsLoading = false;
+            });
+    }
+
+    formatInputType(inputType) {
+        const typeMap = {
+            'SINGLE_CHOICE': 'Single Choice',
+            'FREE_FORM_TEXT': 'Free Form Text',
+            'BOOLEAN': 'Boolean',
+            'DATE': 'Date'
+        };
+        return typeMap[inputType] || inputType;
+    }
+
+    handleRefreshCustomFields() {
+        this.loadCustomFields();
+    }
+
+    handleInlineSave(event) {
+        const draftValues = event.detail.draftValues;
+
+        // Process each changed row - use ramp_id for the API call
+        const promises = draftValues.map(draft => {
+            return updateRampCustomField({
+                fieldId: draft.ramp_id,
+                name: draft.name || null,
+                displayName: draft.display_name || null
+            });
+        });
+
+        this.isLoading = true;
+        Promise.all(promises)
+            .then(() => {
+                this.showToast('Success', 'Custom field(s) updated successfully', 'success');
+                this.draftValues = [];
+                this.loadCustomFields();
+            })
+            .catch(error => {
+                this.showToast('Error', this.getErrorMessage(error), 'error');
+            })
+            .finally(() => {
+                this.isLoading = false;
+            });
+    }
+
+    handleRowAction(event) {
+        const action = event.detail.action;
+        const row = event.detail.row;
+
+        if (action.name === 'delete') {
+            this.handleDeleteField(row.ramp_id, row.name);
+        }
+    }
+
+    handleDeleteField(rampId, fieldName) {
+        if (!confirm(`Are you sure you want to delete the custom field "${fieldName}"? This cannot be undone.`)) {
+            return;
+        }
+
+        this.isLoading = true;
+        deleteRampCustomField({ rampId })
+            .then(result => {
+                this.showToast('Success', result, 'success');
+                this.loadCustomFields();
+            })
+            .catch(error => {
+                this.showToast('Error', this.getErrorMessage(error), 'error');
+            })
+            .finally(() => {
+                this.isLoading = false;
+            });
+    }
+
+    get hasCustomFields() {
+        return this.customFields && this.customFields.length > 0;
     }
 
     handleSave() {

@@ -24,8 +24,8 @@ public with sharing class RampAccountingService {
                 Map<String, Object> response = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
                 String connectionId = (String) response.get('id');
 
-                // Sync custom accounting fields (GL Account Variables 1-4)
-                String fieldSyncResult = RampAccountingFieldService.syncAccountingVariablesToRamp();
+                // Sync custom accounting fields (GL Account Variables 1-4) with connection ID
+                String fieldSyncResult = RampAccountingFieldService.syncAccountingVariablesToRamp(connectionId);
 
                 return 'Accounting connection established successfully. Connection ID: ' +
                        connectionId + '\n\nCustom Fields:\n' + fieldSyncResult;
@@ -53,7 +53,7 @@ public with sharing class RampAccountingService {
                 return response;
             } else {
                 throw new RampAccountingException(
-                    'Failed to retrieve accounting connection. Status: ' + res.getStatusCode()
+                    'Failed to retrieve accounting connection. Status: ' + res.getStatusCode() + ' - ' + res.getBody()
                 );
             }
         } catch (Exception e) {

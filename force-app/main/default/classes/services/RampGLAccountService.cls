@@ -8,12 +8,35 @@ public with sharing class RampGLAccountService {
      * @description Wrapper class for GL Account data sent to Ramp
      */
     public class GLAccountWrapper {
-        public String remote_id { get; set; }
-        public String remote_name { get; set; }
+        public String id { get; set; }
         public String name { get; set; }
         public String code { get; set; }
-        public String type_name { get; set; }
-        public Boolean is_active { get; set; }
+        public String classification { get; set; }
+    }
+
+    /**
+     * @description Maps Accounting Seed GL Account Type to Ramp classification
+     * @param acctSeedType The AcctSeed__Type__c value
+     * @return String The Ramp classification value
+     */
+    private static String mapToRampClassification(String acctSeedType) {
+        if (String.isBlank(acctSeedType)) {
+            return 'EXPENSE';
+        }
+
+        String typeUpper = acctSeedType.toUpperCase();
+        if (typeUpper.contains('REVENUE') || typeUpper.contains('INCOME')) {
+            return 'REVENUE';
+        } else if (typeUpper.contains('EXPENSE')) {
+            return 'EXPENSE';
+        } else if (typeUpper.contains('LIABILITY')) {
+            return 'LIABILITY';
+        } else if (typeUpper.contains('EQUITY')) {
+            return 'EQUITY';
+        } else if (typeUpper.contains('ASSET') || typeUpper.contains('BALANCE SHEET')) {
+            return 'ASSET';
+        }
+        return 'EXPENSE'; // Default fallback
     }
 
     /**
@@ -71,17 +94,19 @@ public with sharing class RampGLAccountService {
 
             for (AcctSeed__GL_Account__c gl : glAccounts) {
                 GLAccountWrapper wrapper = new GLAccountWrapper();
-                wrapper.remote_id = gl.Id; // Use Salesforce ID as external ID
-                wrapper.remote_name = gl.Name;
+                wrapper.id = gl.Id;
                 wrapper.name = gl.Name;
                 wrapper.code = gl.Name; // Using Name as code; adjust if GL Account has a code field
-                wrapper.type_name = gl.AcctSeed__Type__c;
-                wrapper.is_active = gl.AcctSeed__Active__c;
+                wrapper.classification = mapToRampClassification(gl.AcctSeed__Type__c);
 
                 accountsToSync.add(wrapper);
             }
 
-            String body = JSON.serialize(accountsToSync);
+            // Wrap accounts in a dictionary as required by Ramp API
+            Map<String, Object> requestBody = new Map<String, Object>{
+                'gl_accounts' => accountsToSync
+            };
+            String body = JSON.serialize(requestBody);
 
             // Send to Ramp
             HttpResponse res = RampAPIService.post('/developer/v1/accounting/accounts', body);
@@ -107,19 +132,42 @@ public with sharing class RampGLAccountService {
      */
     private static void updateRampIds(List<AcctSeed__GL_Account__c> glAccounts, String responseBody) {
         try {
-            // Parse response - Ramp returns an array of synced accounts
-            List<Object> syncedAccounts = (List<Object>) JSON.deserializeUntyped(responseBody);
+            // Parse response - Ramp may return object with gl_accounts array or just an array
+            Object parsed = JSON.deserializeUntyped(responseBody);
+            List<Object> syncedAccounts;
 
-            // Create a map of remote_id to Ramp ID
-            Map<String, String> remoteIdToRampId = new Map<String, String>();
+            if (parsed instanceof Map<String, Object>) {
+                Map<String, Object> responseMap = (Map<String, Object>) parsed;
+                if (responseMap.containsKey('gl_accounts')) {
+                    syncedAccounts = (List<Object>) responseMap.get('gl_accounts');
+                } else {
+                    // Response might be a single object or different structure
+                    return;
+                }
+            } else if (parsed instanceof List<Object>) {
+                syncedAccounts = (List<Object>) parsed;
+            } else {
+                return;
+            }
+
+            // Create a map of our ID to Ramp's returned ID
+            Map<String, String> sfIdToRampId = new Map<String, String>();
 
             for (Object obj : syncedAccounts) {
                 Map<String, Object> account = (Map<String, Object>) obj;
-                String remoteId = (String) account.get('remote_id');
-                String rampId = (String) account.get('id');
+                // The 'id' we sent is our Salesforce ID, Ramp may return it back
+                // along with their internal ID (could be in a different field)
+                String ourId = (String) account.get('id');
+                String rampId = (String) account.get('ramp_id');
 
-                if (String.isNotBlank(remoteId) && String.isNotBlank(rampId)) {
-                    remoteIdToRampId.put(remoteId, rampId);
+                // If ramp_id not present, the 'id' field might be Ramp's ID
+                // and our ID might be in a different field
+                if (String.isBlank(rampId)) {
+                    rampId = ourId;
+                }
+
+                if (String.isNotBlank(ourId) && String.isNotBlank(rampId)) {
+                    sfIdToRampId.put(ourId, rampId);
                 }
             }
 
@@ -127,8 +175,8 @@ public with sharing class RampGLAccountService {
             List<AcctSeed__GL_Account__c> toUpdate = new List<AcctSeed__GL_Account__c>();
 
             for (AcctSeed__GL_Account__c gl : glAccounts) {
-                if (remoteIdToRampId.containsKey(gl.Id)) {
-                    gl.Ramp_Id__c = remoteIdToRampId.get(gl.Id);
+                if (sfIdToRampId.containsKey(gl.Id)) {
+                    gl.Ramp_Id__c = sfIdToRampId.get(gl.Id);
                     toUpdate.add(gl);
                 }
             }
