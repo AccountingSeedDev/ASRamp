@@ -182,9 +182,10 @@ private class RampGLAccountServiceTest {
             res.setStatusCode(200);
 
             // Check if this is a GL Account sync request
-            if (req.getBody() != null && req.getBody().contains('remote_id')) {
+            if (req.getBody() != null && req.getBody().contains('gl_accounts')) {
                 // Parse the request body to get the GL Accounts
-                List<Object> requestAccounts = (List<Object>) JSON.deserializeUntyped(req.getBody());
+                Map<String, Object> requestMap = (Map<String, Object>) JSON.deserializeUntyped(req.getBody());
+                List<Object> requestAccounts = (List<Object>) requestMap.get('gl_accounts');
 
                 // Build response with Ramp IDs
                 List<Map<String, Object>> responseAccounts = new List<Map<String, Object>>();
@@ -192,15 +193,18 @@ private class RampGLAccountServiceTest {
                 for (Object obj : requestAccounts) {
                     Map<String, Object> account = (Map<String, Object>) obj;
                     Map<String, Object> responseAccount = new Map<String, Object>();
-                    responseAccount.put('id', 'ramp_' + account.get('remote_id'));
-                    responseAccount.put('remote_id', account.get('remote_id'));
+                    responseAccount.put('id', account.get('id'));
+                    responseAccount.put('ramp_id', 'ramp_' + account.get('id'));
                     responseAccount.put('name', account.get('name'));
                     responseAccount.put('code', account.get('code'));
-                    responseAccount.put('is_active', account.get('is_active'));
+                    responseAccount.put('classification', account.get('classification'));
                     responseAccounts.add(responseAccount);
                 }
 
-                res.setBody(JSON.serialize(responseAccounts));
+                Map<String, Object> responseBody = new Map<String, Object>{
+                    'gl_accounts' => responseAccounts
+                };
+                res.setBody(JSON.serialize(responseBody));
             } else {
                 res.setBody('{"success": true}');
             }

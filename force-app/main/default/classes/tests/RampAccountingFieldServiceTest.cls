@@ -73,6 +73,13 @@ private class RampAccountingFieldServiceTest {
             HTTPResponse res = new HTTPResponse();
             res.setHeader('Content-Type', 'application/json');
 
+            // Handle OAuth token request
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write"}');
+                return res;
+            }
+
             if (req.getMethod() == 'POST') {
                 // Create field response
                 res.setStatusCode(201);
@@ -94,6 +101,14 @@ private class RampAccountingFieldServiceTest {
         public HTTPResponse respond(HTTPRequest req) {
             HTTPResponse res = new HTTPResponse();
             res.setHeader('Content-Type', 'application/json');
+
+            // Handle OAuth token request
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write"}');
+                return res;
+            }
+
             res.setStatusCode(204);
             res.setBody('');
             return res;
@@ -104,9 +119,19 @@ private class RampAccountingFieldServiceTest {
      * Mock HTTP callout for error responses
      */
     private class RampAccountingFieldMockError implements HttpCalloutMock {
+        private Boolean tokenProvided = false;
+
         public HTTPResponse respond(HTTPRequest req) {
             HTTPResponse res = new HTTPResponse();
             res.setHeader('Content-Type', 'application/json');
+
+            // Handle OAuth token request
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write"}');
+                return res;
+            }
+
             res.setStatusCode(400);
             res.setBody('{"error": "Bad Request"}');
             return res;
