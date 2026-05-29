@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <label>Default</label>
+    <protected>false</protected>
+    <values>
+        <field>Default_JE_Status__c</field>
+        <value xsi:type="xsd:string">In Process</value>
+    </values>
+    <values>
+        <field>Default_Ledger__c</field>
+        <value xsi:type="xsd:string">Actual</value>
+    </values>
+    <values>
+        <field>Send_Sync_Ack__c</field>
+        <value xsi:type="xsd:boolean">false</value>
+    </values>
+    <values>
+        <field>Sync_Grouping__c</field>
+        <value xsi:type="xsd:string">Daily</value>
+    </values>
+</CustomMetadata>

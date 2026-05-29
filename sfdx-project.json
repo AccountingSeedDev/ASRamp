@@ -1,21 +1,17 @@
 {
   "packageDirectories": [
     {
+      "versionName": "ver 0.1",
+      "versionNumber": "0.1.0.NEXT",
       "path": "force-app",
       "default": true,
+      "package": "ASRamp",
+      "versionDescription": "",
       "dependencies": [
         {
           "package": "Accounting Seed Financial Suite (1GP) @3.348"
         }
       ]
-    },
-    {
-      "versionName": "ver 0.1",
-      "versionNumber": "0.1.0.NEXT",
-      "path": "force-app/main/default",
-      "default": false,
-      "package": "ASRamp",
-      "versionDescription": ""
     }
   ],
   "name": "Accounting Seed Ramp",
@@ -24,6 +20,7 @@
   "sourceApiVersion": "65.0",
   "packageAliases": {
     "Accounting Seed Financial Suite (1GP) @3.348": "04tHo000000hdf3IAA",
-    "ASRamp": "0HoRi000000F3OzKAK"
+    "ASRamp": "0HoRi000000F3OzKAK",
+    "ASRamp@0.1.0-1": "04tRi000000lktpIAA"
   }
 }

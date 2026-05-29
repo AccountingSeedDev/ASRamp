@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Send_Sync_Ack__c</fullName>
+    <defaultValue>true</defaultValue>
+    <description>When checked, after creating Journal Entries the sync POSTs an acknowledgement to Ramp&apos;s /accounting/syncs endpoint, which marks the transactions SYNCED in Ramp. Uncheck to leave transactions SYNC_READY (useful for repeatable testing).</description>
+    <fieldManageability>SubscriberControlled</fieldManageability>
+    <label>Send Sync Ack to Ramp</label>
+    <type>Checkbox</type>
+</CustomField>

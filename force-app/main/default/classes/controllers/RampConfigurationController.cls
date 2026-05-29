@@ -247,17 +247,17 @@ public with sharing class RampConfigurationController {
     }
 
     /**
-     * @description Saves credential configuration
-     * Note: This method provides instructions for manual deployment
-     * Automated Custom Metadata deployment requires Metadata API and cannot be done directly from Apex in the UI
+     * @description Saves credential configuration by enqueueing a Metadata API
+     * deployment that upserts the Ramp_Credential__mdt record in place.
+     * Requires the running user to have Modify Metadata Through Metadata API
+     * (or Customize Application).
      *
      * @param credential The credential data to save
-     * @return String Instructions for deploying the metadata
+     * @return String Success message including the deployment job Id
      */
     @AuraEnabled
     public static String saveCredential(CredentialWrapper credential) {
         try {
-            // Validate inputs
             if (String.isBlank(credential.developerName)) {
                 throw new AuraHandledException('Developer Name is required');
             }
@@ -268,79 +268,51 @@ public with sharing class RampConfigurationController {
                 throw new AuraHandledException('Client Secret is required');
             }
 
-            // Generate the Custom Metadata XML
-            String metadataXml = generateMetadataXml(credential);
+            // Build the CMDT record. fullName is "<MdtApiName>.<RecordDeveloperName>".
+            Metadata.CustomMetadata md = new Metadata.CustomMetadata();
+            md.fullName = 'Ramp_Credential.' + credential.developerName;
+            md.label = String.isBlank(credential.label) ? credential.developerName : credential.label;
 
-            // Since we can't deploy directly from Apex in Lightning, return instructions
-            String instructions = 'To deploy this configuration:\n\n';
-            instructions += '1. Create a file: force-app/main/default/customMetadata/Ramp_Credential.' +
-                           credential.developerName + '.md-meta.xml\n';
-            instructions += '2. Use the following content:\n\n' + metadataXml + '\n\n';
-            instructions += '3. Deploy using: sf project deploy start --source-dir force-app/main/default/customMetadata\n\n';
-            instructions += 'Alternatively, you can update the Custom Metadata directly in Setup > Custom Metadata Types.';
+            md.values.add(buildValue('Client_ID__c', credential.clientId));
+            md.values.add(buildValue('Client_Secret__c', credential.clientSecret));
+            if (String.isNotBlank(credential.tokenUrl)) {
+                md.values.add(buildValue('Token_URL__c', credential.tokenUrl));
+            }
+            if (String.isNotBlank(credential.apiBaseUrl)) {
+                md.values.add(buildValue('API_Base_URL__c', credential.apiBaseUrl));
+            }
+            if (String.isNotBlank(credential.scopes)) {
+                md.values.add(buildValue('Scopes__c', credential.scopes));
+            }
+            md.values.add(buildValue('Is_Active__c', credential.isActive));
 
-            return instructions;
+            Metadata.DeployContainer container = new Metadata.DeployContainer();
+            container.addMetadata(md);
+
+            // Clear the cached token — once the new credential lands, the next
+            // API call should re-OAuth using the updated client id/secret.
+            RampAuthService.clearCachedToken();
+
+            // Metadata.Operations.enqueueDeployment performs a real deploy and
+            // can't be exercised in @IsTest context — skip it there so tests
+            // still cover the builder/validation paths.
+            if (Test.isRunningTest()) {
+                return 'Credential validated (test mode — deployment skipped).';
+            }
+            Id jobId = Metadata.Operations.enqueueDeployment(container, null);
+            return 'Credential save submitted. Deployment Job Id: ' + jobId +
+                ' — the new values will be live within a few seconds. ' +
+                'Refresh this page to see them and try Test Connection.';
         } catch (Exception e) {
             throw new AuraHandledException('Error saving credential: ' + e.getMessage());
         }
     }
 
-    /**
-     * @description Generates the XML content for Custom Metadata deployment
-     * @param credential The credential data
-     * @return String The XML content
-     */
-    private static String generateMetadataXml(CredentialWrapper credential) {
-        String xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
-        xml += '<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" ';
-        xml += 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ';
-        xml += 'xmlns:xsd="http://www.w3.org/2001/XMLSchema">\n';
-        xml += '    <label>' + escapeXml(credential.label) + '</label>\n';
-        xml += '    <protected>false</protected>\n';
-
-        if (String.isNotBlank(credential.clientId)) {
-            xml += '    <values>\n';
-            xml += '        <field>Client_ID__c</field>\n';
-            xml += '        <value xsi:type="xsd:string">' + escapeXml(credential.clientId) + '</value>\n';
-            xml += '    </values>\n';
-        }
-
-        if (String.isNotBlank(credential.clientSecret)) {
-            xml += '    <values>\n';
-            xml += '        <field>Client_Secret__c</field>\n';
-            xml += '        <value xsi:type="xsd:string">' + escapeXml(credential.clientSecret) + '</value>\n';
-            xml += '    </values>\n';
-        }
-
-        if (String.isNotBlank(credential.tokenUrl)) {
-            xml += '    <values>\n';
-            xml += '        <field>Token_URL__c</field>\n';
-            xml += '        <value xsi:type="xsd:string">' + escapeXml(credential.tokenUrl) + '</value>\n';
-            xml += '    </values>\n';
-        }
-
-        if (String.isNotBlank(credential.apiBaseUrl)) {
-            xml += '    <values>\n';
-            xml += '        <field>API_Base_URL__c</field>\n';
-            xml += '        <value xsi:type="xsd:string">' + escapeXml(credential.apiBaseUrl) + '</value>\n';
-            xml += '    </values>\n';
-        }
-
-        if (String.isNotBlank(credential.scopes)) {
-            xml += '    <values>\n';
-            xml += '        <field>Scopes__c</field>\n';
-            xml += '        <value xsi:type="xsd:string">' + escapeXml(credential.scopes) + '</value>\n';
-            xml += '    </values>\n';
-        }
-
-        xml += '    <values>\n';
-        xml += '        <field>Is_Active__c</field>\n';
-        xml += '        <value xsi:type="xsd:boolean">' + credential.isActive + '</value>\n';
-        xml += '    </values>\n';
-
-        xml += '</CustomMetadata>';
-
-        return xml;
+    private static Metadata.CustomMetadataValue buildValue(String fieldApiName, Object value) {
+        Metadata.CustomMetadataValue v = new Metadata.CustomMetadataValue();
+        v.field = fieldApiName;
+        v.value = value;
+        return v;
     }
 
     /**
@@ -445,18 +417,86 @@ public with sharing class RampConfigurationController {
     }
 
     /**
-     * @description Escapes XML special characters
-     * @param input The input string
-     * @return String The escaped string
+     * @description Enqueues Pipeline 1 — starts a chained Queueable that
+     * fetches one page of SYNC_READY transactions, builds Journal Entries,
+     * and POSTs the sync acknowledgment back to Ramp.
+     * @return String The Apex Job Id and a short status message
      */
-    private static String escapeXml(String input) {
-        if (String.isBlank(input)) {
-            return input;
+    @AuraEnabled
+    public static String syncTransactions() {
+        try {
+            Id jobId = System.enqueueJob(new RampTransactionSyncQueueable());
+            return 'Transaction sync started. Job Id: ' + jobId +
+                '. The job will drain all SYNC_READY transactions across pages and ' +
+                'POST sync acknowledgments back to Ramp.';
+        } catch (Exception e) {
+            throw new AuraHandledException('Error starting transaction sync: ' + e.getMessage());
         }
-        return input.replace('&', '&amp;')
-                    .replace('<', '&lt;')
-                    .replace('>', '&gt;')
-                    .replace('"', '&quot;')
-                    .replace('\'', '&apos;');
     }
+
+    /**
+     * @description Aggregate stats for the Transactions tab in the LWC.
+     * @return Map of Pending/Synced_To_Ramp/Failed counts (and total) over
+     * Journal Entries that originated from Ramp (Ramp_Sync_Status__c not null).
+     */
+    @AuraEnabled(cacheable=false)
+    public static Map<String, Integer> getTransactionSyncStats() {
+        try {
+            Map<String, Integer> stats = new Map<String, Integer>{
+                'pending' => 0,
+                'synced' => 0,
+                'failed' => 0,
+                'total' => 0
+            };
+            for (AggregateResult ar : [
+                SELECT Ramp_Sync_Status__c status, COUNT(Id) c
+                FROM AcctSeed__Journal_Entry__c
+                WHERE Ramp_Sync_Status__c != null
+                GROUP BY Ramp_Sync_Status__c
+            ]) {
+                String status = (String) ar.get('status');
+                Integer c = (Integer) ar.get('c');
+                stats.put('total', stats.get('total') + c);
+                if (status == 'Pending') stats.put('pending', c);
+                else if (status == 'Synced_To_Ramp') stats.put('synced', c);
+                else if (status == 'Failed') stats.put('failed', c);
+            }
+            return stats;
+        } catch (Exception e) {
+            throw new AuraHandledException('Error getting transaction sync stats: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Returns the most recent JE failures for surfacing in the
+     * LWC error queue. Limited to 50 rows; sorted newest first.
+     */
+    @AuraEnabled(cacheable=false)
+    public static List<Map<String, Object>> getRecentTransactionFailures() {
+        try {
+            List<Map<String, Object>> rows = new List<Map<String, Object>>();
+            for (AcctSeed__Journal_Entry__c je : [
+                SELECT Id, Name, AcctSeed__ExtId__c, AcctSeed__Journal_Date__c,
+                       AcctSeed__Reference__c, Ramp_Sync_Error__c, LastModifiedDate
+                FROM AcctSeed__Journal_Entry__c
+                WHERE Ramp_Sync_Status__c = 'Failed'
+                ORDER BY LastModifiedDate DESC
+                LIMIT 50
+            ]) {
+                rows.add(new Map<String, Object>{
+                    'id' => je.Id,
+                    'name' => je.Name,
+                    'rampTransactionId' => je.AcctSeed__ExtId__c,
+                    'date' => je.AcctSeed__Journal_Date__c,
+                    'memo' => je.AcctSeed__Reference__c,
+                    'error' => je.Ramp_Sync_Error__c,
+                    'lastModifiedDate' => je.LastModifiedDate
+                });
+            }
+            return rows;
+        } catch (Exception e) {
+            throw new AuraHandledException('Error getting recent failures: ' + e.getMessage());
+        }
+    }
+
 }

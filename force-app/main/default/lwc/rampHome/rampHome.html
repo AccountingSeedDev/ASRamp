@@ -1,0 +1,221 @@
+<template>
+    <div class="home">
+        <!-- ───────── header ───────── -->
+        <header class="hdr">
+            <div class="lockup">
+                <svg class="as-mark" viewBox="0 0 86 96.75" aria-hidden="true">
+                    <path d="M29.25 5.25C12.75 5.25 0 18.75 0 35.25 0 90.75 0 90.75 0 90.75 55.5 90.75 55.5 90.75 55.5 90.75 71.25 90.75 85.5 77.25 85.5 60.75 85.5 5.25 85.5 5.25 85.5 5.25L29.25 5.25ZM64.5 52.5C64.5 62.25 57 69.75 47.25 69.75 20.25 69.75 20.25 69.75 20.25 69.75 20.25 43.5 20.25 43.5 20.25 43.5 20.25 33.75 28.5 26.25 37.5 26.25 64.5 26.25 64.5 26.25 64.5 26.25L64.5 52.5Z" fill="#1AA2DC"></path>
+                    <path d="M77.25 81C85.5 72.75 85.5 61.5 85.5 61.5 85.5 5.25 85.5 5.25 85.5 5.25 64.5 26.25 64.5 26.25 64.5 26.25 64.5 52.5 64.5 52.5 64.5 52.5 64.5 69.75 49.5 90.75 0 90.75 55.5 90.75 55.5 90.75 55.5 90.75 58.5 90.75 69 90 77.25 81L77.25 81Z" fill="#2874BB"></path>
+                    <path d="M42.75 57.75C37.5 57.75 33 53.25 33 48 33 42.75 37.5 38.25 42.75 38.25 45 38.25 52.5 38.25 52.5 38.25 52.5 38.25 52.5 45.75 52.5 48 52.5 53.25 48 57.75 42.75 57.75L42.75 57.75Z" fill="#4CB748"></path>
+                </svg>
+                <span class="brand-as">Accounting Seed</span>
+                <span class="swap">&#8644;</span>
+                <span class="ramp-badge">R</span>
+                <span class="brand-ramp">Ramp</span>
+                <span class="brand-sfx">Integration</span>
+            </div>
+            <div class="spacer"></div>
+            <div class="conn">
+                <span class={connClass}></span>
+                <div class="conn-text">
+                    <div class="conn-title">{connLabel}</div>
+                    <div class="conn-sub">{business}</div>
+                </div>
+            </div>
+            <button class="btn btn-neutral" onclick={handleRefresh}>
+                <lightning-icon icon-name="utility:refresh" size="x-small" alternative-text="Refresh"></lightning-icon>
+                <span>Refresh</span>
+            </button>
+            <button class="btn btn-primary" onclick={handleSyncAll} disabled={syncAllDisabled}>
+                <lightning-icon icon-name="utility:flow" size="x-small" variant="inverse" alternative-text=""></lightning-icon>
+                <span>{syncAllLabel}</span>
+            </button>
+        </header>
+
+        <div class="body">
+            <!-- ───────── setup banner / health strip ───────── -->
+            <template lwc:if={showSetupBanner}>
+                <div class="setup">
+                    <div class="setup-top">
+                        <div class="ring" style={ringStyle}>
+                            <div class="ring-num">{donePct}%</div>
+                        </div>
+                        <div class="setup-copy">
+                            <div class="eyebrow">Finish setup</div>
+                            <div class="setup-title">Let’s connect Ramp to Accounting Seed</div>
+                            <div class="setup-sub">{doneCountLabel} · Up next: <strong>{nextStepTitle}</strong></div>
+                        </div>
+                        <button class="btn btn-cyan">Continue setup</button>
+                    </div>
+                    <div class="setup-bar"><div class="setup-bar-fill" style={progressStyle}></div></div>
+                    <div class="steps">
+                        <template for:each={steps} for:item="s">
+                            <div key={s.id} class={s.cls}>
+                                <div class={s.badgeCls}>
+                                    <template lwc:if={s.isDone}>&#10003;</template>
+                                    <template lwc:else>{s.n}</template>
+                                </div>
+                                <div class="step-text">
+                                    <div class="step-title">{s.title}</div>
+                                    <div class="step-desc">{s.descr}</div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+            <template lwc:else>
+                <div class={healthClass}>
+                    <lightning-icon icon-name={healthIcon} size="small" class="strip-icon"></lightning-icon>
+                    <div class="strip-title">{healthTitle}</div>
+                    <div class="strip-detail">{healthDetail}</div>
+                    <div class="spacer"></div>
+                    <template lwc:if={hasFailures}>
+                        <button class="btn btn-danger sm" data-id="errors" onclick={selectTab}>Review errors</button>
+                    </template>
+                </div>
+            </template>
+
+            <!-- ───────── KPI row ───────── -->
+            <div class="kpis">
+                <template for:each={kpis} for:item="k">
+                    <div key={k.key} class="kpi">
+                        <div class="kpi-label">{k.label}</div>
+                        <div class="kpi-value">{k.value}</div>
+                        <div class={k.toneCls}>{k.sub}</div>
+                    </div>
+                </template>
+            </div>
+
+            <!-- ───────── pipelines ───────── -->
+            <div class="sec-label">
+                <lightning-icon icon-name="utility:flow" size="x-small"></lightning-icon>
+                <span>Sync pipelines</span>
+                <div class="spacer"></div>
+                <span class="sec-hint">4 pipelines · 2 directions</span>
+            </div>
+            <div class="pgrid">
+                <template for:each={pipelines} for:item="p">
+                    <div key={p.id} class={p.cardCls}>
+                        <div class="pcard-top">
+                            <div class={p.tintCls}>
+                                <lightning-icon icon-name={p.iconName} size="small"></lightning-icon>
+                            </div>
+                            <div class="pcard-head">
+                                <div class="pcard-name-row">
+                                    <span class="pcard-name">{p.name}</span>
+                                    <span class="phase">{p.phase}</span>
+                                </div>
+                                <div class="pcard-flow">{p.fromLabel} &#8594; {p.toLabel} · <span class="pcard-target">{p.target}</span></div>
+                            </div>
+                            <span class={p.statusCls}>{p.statusLabel}</span>
+                        </div>
+
+                        <template lwc:if={p.notEnabled}>
+                            <div class="pcard-empty">{p.blurb}</div>
+                        </template>
+                        <template lwc:else>
+                            <div class="counts">
+                                <template for:each={p.counts} for:item="c">
+                                    <div key={c.key} class="count">
+                                        <div class={c.cls}>{c.n}</div>
+                                        <div class="count-label">{c.label}</div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+
+                        <div class="pcard-foot">
+                            <span class="records">{p.records}</span>
+                            <div class="spacer"></div>
+                            <template lwc:if={p.showSync}>
+                                <button class="btn btn-secondary sm" data-id={p.id} data-action={p.action}
+                                        onclick={handlePipeSync} disabled={p.syncDisabled}>
+                                    <lightning-icon icon-name="utility:sync" size="xx-small"></lightning-icon>
+                                    <span>{p.syncLabel}</span>
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <!-- ───────── lower zone ───────── -->
+            <div class="lower">
+                <div class="ltabs">
+                    <button class={tabErrorsCls} data-id="errors" onclick={selectTab}>{errorTabLabel}</button>
+                    <button class={tabSettingsCls} data-id="settings" onclick={selectTab}>Settings</button>
+                    <button class={tabScheduleCls} data-id="schedule" onclick={selectTab}>Sync schedule</button>
+                </div>
+                <div class="lower-body">
+                    <!-- error queue -->
+                    <template lwc:if={showErrors}>
+                        <template lwc:if={hasFailures}>
+                            <table class="tbl">
+                                <thead>
+                                    <tr>
+                                        <th>Record</th><th>Ramp object</th><th>Reason</th><th class="ta-r"></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template for:each={failures} for:item="f">
+                                        <tr key={f.id}>
+                                            <td>
+                                                <div class="cell-strong">{f.name}</div>
+                                                <div class="cell-sub">{f.objType}</div>
+                                            </td>
+                                            <td class="mono">{f.rampId}</td>
+                                            <td class="reason">{f.error}</td>
+                                            <td class="ta-r">
+                                                <button class="btn btn-neutral sm" onclick={handleRetry}>
+                                                    <lightning-icon icon-name="utility:redo" size="xx-small"></lightning-icon>
+                                                    <span>Retry</span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </template>
+                        <template lwc:else>
+                            <div class="empty">
+                                <lightning-icon icon-name="utility:success" size="small"></lightning-icon>
+                                <div class="empty-title">No errors in the queue</div>
+                                <div class="empty-sub">Every record posted cleanly and was acknowledged by Ramp.</div>
+                            </div>
+                        </template>
+                    </template>
+
+                    <!-- settings -->
+                    <template lwc:if={showSettings}>
+                        <div class="kv-list">
+                            <template for:each={settings} for:item="s">
+                                <div key={s.label} class="kv">
+                                    <span class="kv-k">{s.label}</span>
+                                    <span class="kv-v">{s.value}</span>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="hint-note">Posting configuration lives in <span class="mono">Ramp_Sync_Settings__mdt</span> and the GL Account Specification metadata. Manage it from the Ramp Configuration tab.</div>
+                    </template>
+
+                    <!-- schedule -->
+                    <template lwc:if={showSchedule}>
+                        <div class="kv-list">
+                            <template for:each={schedules} for:item="sc">
+                                <div key={sc.key} class="kv">
+                                    <span class="kv-k">{sc.name}</span>
+                                    <span class="sched-right">
+                                        <span class="sched-cad">{sc.cadence}</span>
+                                        <span class="sched-note">{sc.note}</span>
+                                    </span>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="hint-note">Scheduled polling is configured with <span class="mono">System.schedule()</span>. Until enabled, runs are triggered manually with the Sync buttons above.</div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </div>
+</template>

@@ -40,12 +40,17 @@ public with sharing class RampGLAccountService {
     }
 
     /**
-     * @description Syncs all active GL Accounts to Ramp
-     * @return String Summary message with sync results
+     * @description Syncs all active GL Accounts to Ramp.
+     *
+     * Idempotent: first fetches every existing GL account already on Ramp and
+     * splits the local list into "already there" vs "needs create."  The
+     * already-there ones just have Ramp_Id__c re-stamped locally — no POST,
+     * no duplicate-id 400. New ones are POSTed in batches of {@link #BATCH_SIZE}.
+     * This makes the LWC button safe to click after a tenant switch or after
+     * a manual local clear of Ramp_Id__c.
      */
     public static String syncAllGLAccounts() {
         try {
-            // Query all active GL Accounts
             List<AcctSeed__GL_Account__c> glAccounts = [
                 SELECT Id, Name, AcctSeed__Bank__c, AcctSeed__Type__c,
                        AcctSeed__Active__c, Ramp_Id__c
@@ -58,28 +63,115 @@ public with sharing class RampGLAccountService {
                 return 'No active GL Accounts found to sync.';
             }
 
-            Integer totalSynced = 0;
-            Integer totalBatches = (Integer) Math.ceil((Decimal) glAccounts.size() / BATCH_SIZE);
+            // 1. Discover what's already on Ramp so we can skip duplicate POSTs.
+            Map<String, String> existingByOurId = fetchExistingRampAccounts();
 
-            // Process in batches of 500
-            for (Integer i = 0; i < totalBatches; i++) {
-                Integer startIdx = i * BATCH_SIZE;
-                Integer endIdx = Math.min(startIdx + BATCH_SIZE, glAccounts.size());
-                List<AcctSeed__GL_Account__c> batch = new List<AcctSeed__GL_Account__c>();
-
-                for (Integer j = startIdx; j < endIdx; j++) {
-                    batch.add(glAccounts[j]);
+            // 2. Split into already-there (just re-stamp) vs. needs-create.
+            List<AcctSeed__GL_Account__c> toCreate = new List<AcctSeed__GL_Account__c>();
+            List<AcctSeed__GL_Account__c> toRestamp = new List<AcctSeed__GL_Account__c>();
+            for (AcctSeed__GL_Account__c gl : glAccounts) {
+                String rampId = existingByOurId.get(gl.Id);
+                if (String.isBlank(rampId)) {
+                    toCreate.add(gl);
+                } else if (gl.Ramp_Id__c != rampId) {
+                    gl.Ramp_Id__c = rampId;
+                    toRestamp.add(gl);
                 }
-
-                syncGLAccountBatch(batch);
-                totalSynced += batch.size();
             }
 
-            return 'Successfully synced ' + totalSynced + ' GL Account(s) to Ramp in ' +
-                   totalBatches + ' batch(es).';
+            Integer restamped = 0;
+            if (!toRestamp.isEmpty()) {
+                update toRestamp;
+                restamped = toRestamp.size();
+            }
+
+            // 3. POST only the truly new ones, in batches of BATCH_SIZE.
+            Integer created = 0;
+            Integer totalBatches = 0;
+            if (!toCreate.isEmpty()) {
+                totalBatches = (Integer) Math.ceil((Decimal) toCreate.size() / BATCH_SIZE);
+                for (Integer i = 0; i < totalBatches; i++) {
+                    Integer startIdx = i * BATCH_SIZE;
+                    Integer endIdx = Math.min(startIdx + BATCH_SIZE, toCreate.size());
+                    List<AcctSeed__GL_Account__c> batch = new List<AcctSeed__GL_Account__c>();
+                    for (Integer j = startIdx; j < endIdx; j++) batch.add(toCreate[j]);
+
+                    syncGLAccountBatch(batch);
+                    created += batch.size();
+                }
+            }
+
+            List<String> parts = new List<String>();
+            if (created > 0) parts.add('created ' + created + ' (' + totalBatches + ' batch(es))');
+            if (restamped > 0) parts.add('restored Ramp_Id__c on ' + restamped + ' existing record(s)');
+            if (parts.isEmpty()) parts.add('all GL Accounts already linked — nothing to do');
+            return 'GL Account sync complete: ' + String.join(parts, '; ') + '.';
         } catch (Exception e) {
             throw new RampGLAccountException('Error syncing GL Accounts: ' + e.getMessage(), e);
         }
+    }
+
+    /**
+     * @description Pulls every active GL account from Ramp and returns a map
+     * keyed by the "id" we originally sent (= our Salesforce 18-char Id).
+     */
+    @TestVisible
+    private static Map<String, String> fetchExistingRampAccounts() {
+        Map<String, String> sfIdToRampId = new Map<String, String>();
+        String nextStart = null;
+        Integer pages = 0;
+
+        do {
+            String endpoint = '/developer/v1/accounting/accounts?page_size=100';
+            if (String.isNotBlank(nextStart)) {
+                endpoint += '&start=' + EncodingUtil.urlEncode(nextStart, 'UTF-8');
+            }
+
+            HttpResponse res = RampAPIService.get(endpoint);
+            if (res.getStatusCode() != 200) {
+                // Don't fail the whole sync — just proceed as if Ramp has nothing.
+                System.debug(LoggingLevel.WARN,
+                    'fetchExistingRampAccounts failed at page ' + pages +
+                    ': ' + res.getStatusCode() + ' ' + res.getBody());
+                break;
+            }
+
+            Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            List<Object> data = (List<Object>) body.get('data');
+            if (data != null) {
+                for (Object o : data) {
+                    Map<String, Object> a = (Map<String, Object>) o;
+                    String sfId = (String) a.get('id');
+                    String rampId = (String) a.get('ramp_id');
+                    Boolean isActive = (Boolean) a.get('is_active');
+                    if (String.isNotBlank(sfId) && String.isNotBlank(rampId) && isActive == true) {
+                        sfIdToRampId.put(sfId, rampId);
+                    }
+                }
+            }
+
+            nextStart = extractNextCursor(body);
+            pages++;
+        } while (String.isNotBlank(nextStart) && pages < 50);
+
+        return sfIdToRampId;
+    }
+
+    /**
+     * @description Pulls the cursor out of Ramp's page.next URL. Returns null
+     * when there's no next page.
+     */
+    private static String extractNextCursor(Map<String, Object> body) {
+        Map<String, Object> page = (Map<String, Object>) body.get('page');
+        if (page == null) return null;
+        String nextUrl = (String) page.get('next');
+        if (String.isBlank(nextUrl)) return null;
+        Integer i = nextUrl.indexOf('start=');
+        if (i < 0) return null;
+        String cursor = nextUrl.substring(i + 6);
+        Integer amp = cursor.indexOf('&');
+        if (amp >= 0) cursor = cursor.substring(0, amp);
+        return cursor;
     }
 
     /**

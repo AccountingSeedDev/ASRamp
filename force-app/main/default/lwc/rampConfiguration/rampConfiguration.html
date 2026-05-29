@@ -342,6 +342,130 @@
                         </template>
                     </div>
                 </lightning-tab>
+
+                <!-- Transactions Tab -->
+                <lightning-tab label="Transactions" icon-name="utility:money">
+                    <div class="slds-p-around_small">
+                        <template if:true={hasExistingCredential}>
+                            <lightning-layout multiple-rows>
+                                <!-- Sync Trigger -->
+                                <lightning-layout-item size="12" class="slds-m-bottom_medium">
+                                    <div class="slds-box slds-theme_default">
+                                        <h3 class="slds-text-heading_small slds-m-bottom_small">Transaction Sync (Pipeline 1)</h3>
+                                        <p class="slds-text-body_small slds-m-bottom_medium">
+                                            Pulls SYNC_READY card transactions from Ramp and creates Journal Entries in
+                                            Accounting Seed. The clearing GL and default ledger are configured in
+                                            <code>Ramp_Sync_Settings__mdt.Default</code>.
+                                        </p>
+
+                                        <div class="slds-box slds-theme_info slds-m-bottom_medium">
+                                            <p class="slds-text-body_small">
+                                                <lightning-icon icon-name="utility:info" size="xx-small"></lightning-icon>
+                                                <strong>Accounting model:</strong>
+                                            </p>
+                                            <ul class="slds-list_dotted slds-m-left_large slds-text-body_small">
+                                                <li>Debit: expense GL coded on the Ramp transaction (one line per split)</li>
+                                                <li>Credit: Card Clearing GL from sync settings (one line, totals the debits)</li>
+                                                <li>Refunds flip debit/credit on the same two-line shape</li>
+                                                <li>Each JE is upserted by <code>AcctSeed__ExtId__c</code> = Ramp transaction id</li>
+                                            </ul>
+                                        </div>
+
+                                        <div class="slds-text-align_center">
+                                            <lightning-button
+                                                variant="brand"
+                                                label="Sync Ready Transactions"
+                                                onclick={handleSyncTransactions}
+                                                disabled={isLoading}
+                                                icon-name="utility:sync">
+                                            </lightning-button>
+                                        </div>
+                                    </div>
+                                </lightning-layout-item>
+
+                                <!-- Sync Stats -->
+                                <lightning-layout-item size="12" class="slds-m-bottom_medium">
+                                    <div class="slds-box slds-theme_default">
+                                        <div class="slds-grid slds-grid_align-spread slds-m-bottom_small">
+                                            <h3 class="slds-text-heading_small">Journal Entry Sync Status</h3>
+                                            <lightning-button
+                                                variant="neutral"
+                                                label="Refresh"
+                                                onclick={handleRefreshTransactionStats}
+                                                disabled={transactionStatsLoading}
+                                                icon-name="utility:refresh">
+                                            </lightning-button>
+                                        </div>
+
+                                        <template if:true={transactionStatsLoading}>
+                                            <div class="slds-align_absolute-center slds-p-around_medium">
+                                                <lightning-spinner alternative-text="Loading" size="small"></lightning-spinner>
+                                            </div>
+                                        </template>
+
+                                        <template if:false={transactionStatsLoading}>
+                                            <lightning-layout multiple-rows>
+                                                <lightning-layout-item size="3" padding="around-small">
+                                                    <div class="slds-text-align_center slds-box slds-theme_default">
+                                                        <p class="slds-text-heading_large">{transactionStats.total}</p>
+                                                        <p class="slds-text-body_small">Total Ramp JEs</p>
+                                                    </div>
+                                                </lightning-layout-item>
+                                                <lightning-layout-item size="3" padding="around-small">
+                                                    <div class="slds-text-align_center slds-box slds-theme_default">
+                                                        <p class="slds-text-heading_large">{transactionStats.synced}</p>
+                                                        <p class="slds-text-body_small">Synced to Ramp</p>
+                                                    </div>
+                                                </lightning-layout-item>
+                                                <lightning-layout-item size="3" padding="around-small">
+                                                    <div class="slds-text-align_center slds-box slds-theme_default">
+                                                        <p class="slds-text-heading_large">{transactionStats.pending}</p>
+                                                        <p class="slds-text-body_small">Pending ack</p>
+                                                    </div>
+                                                </lightning-layout-item>
+                                                <lightning-layout-item size="3" padding="around-small">
+                                                    <div class="slds-text-align_center slds-box slds-theme_default">
+                                                        <p class="slds-text-heading_large">{transactionStats.failed}</p>
+                                                        <p class="slds-text-body_small">Failed</p>
+                                                    </div>
+                                                </lightning-layout-item>
+                                            </lightning-layout>
+                                        </template>
+                                    </div>
+                                </lightning-layout-item>
+
+                                <!-- Recent Failures -->
+                                <lightning-layout-item size="12">
+                                    <div class="slds-box slds-theme_default">
+                                        <h3 class="slds-text-heading_small slds-m-bottom_small">Recent Failures</h3>
+                                        <template if:true={hasTransactionFailures}>
+                                            <lightning-datatable
+                                                key-field="id"
+                                                data={transactionFailures}
+                                                columns={transactionFailureColumns}
+                                                hide-checkbox-column>
+                                            </lightning-datatable>
+                                        </template>
+                                        <template if:false={hasTransactionFailures}>
+                                            <div class="slds-text-align_center slds-p-around_medium slds-text-color_weak">
+                                                No failed Journal Entries.
+                                            </div>
+                                        </template>
+                                    </div>
+                                </lightning-layout-item>
+                            </lightning-layout>
+                        </template>
+
+                        <template if:false={hasExistingCredential}>
+                            <div class="slds-text-align_center slds-p-around_large">
+                                <lightning-icon icon-name="utility:info" size="large"></lightning-icon>
+                                <p class="slds-text-heading_small slds-m-top_medium">
+                                    Configure your authorization credentials first to sync transactions.
+                                </p>
+                            </div>
+                        </template>
+                    </div>
+                </lightning-tab>
             </lightning-tabset>
 
             <!-- Loading Spinner -->

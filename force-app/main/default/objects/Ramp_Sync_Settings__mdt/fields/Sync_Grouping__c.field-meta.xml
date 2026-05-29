@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Sync_Grouping__c</fullName>
+    <description>Controls how Ramp card transactions are grouped into Journal Entries. Daily = one JE per accounting date per entity/currency. By Run = one JE per accounting period per sync run per entity/currency.</description>
+    <fieldManageability>SubscriberControlled</fieldManageability>
+    <label>Sync Grouping</label>
+    <required>false</required>
+    <type>Picklist</type>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>Daily</fullName>
+                <default>true</default>
+                <label>Daily</label>
+            </value>
+            <value>
+                <fullName>By Run</fullName>
+                <default>false</default>
+                <label>By Run</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

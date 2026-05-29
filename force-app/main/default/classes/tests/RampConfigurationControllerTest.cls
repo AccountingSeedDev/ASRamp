@@ -74,7 +74,7 @@ private class RampConfigurationControllerTest {
         Test.stopTest();
 
         System.assertNotEquals(null, result, 'Result should not be null');
-        System.assert(result.contains('deploy'), 'Should contain deployment instructions');
+        System.assert(result.toLowerCase().contains('credential'), 'Should report on the credential save: ' + result);
     }
 
     @IsTest
@@ -309,6 +309,145 @@ private class RampConfigurationControllerTest {
                 res.setBody('{"id":"connection-123","remote_provider_name":"ACCOUNTING_SEED"}');
             }
 
+            return res;
+        }
+    }
+
+    // --------------------------------------------------------------------
+    //  Pipeline 1 — transaction sync
+    // --------------------------------------------------------------------
+
+    private static void configureSettingsForSyncTests() {
+        // Override CMDT so tests don't depend on the deployed Default record's values.
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'TestLedger',
+            Default_JE_Status__c = 'In Process'
+        );
+        RampSyncSettingsService.resetCache();
+    }
+
+    @IsTest
+    static void syncTransactions_returnsJobId() {
+        // No HTTP mock — the Queueable will try to make callouts when it runs,
+        // but we stop the test before it executes by checking the return value
+        // from System.enqueueJob right away.
+        // Note: the Queueable still gets fired by Test.stopTest. Set a mock to
+        // keep it from blowing up.
+        TestDataFactory.getInstance().initialize();
+        configureSettingsForSyncTests();
+        Test.setMock(HttpCalloutMock.class, new EmptyPageMock());
+
+        Test.startTest();
+        String result = RampConfigurationController.syncTransactions();
+        Test.stopTest();
+
+        System.assertNotEquals(null, result);
+        System.assert(result.contains('Transaction sync started'), 'Should return started message: ' + result);
+        System.assert(result.contains('Job Id'), 'Should include job id: ' + result);
+    }
+
+    @IsTest
+    static void getTransactionSyncStats_aggregatesByStatus() {
+        TestDataFactory.getInstance().initialize();
+        TestDataFactory.getInstance().disableAutoPost();
+        User admin = TestDataFactory.getInstance().getAdminUser();
+
+        // Seed three JEs with varied statuses (skip the JE-line balance constraint
+        // by using a small inline DML approach — but JE inserts need at least
+        // basic required fields)
+        AcctSeed__Ledger__c ledger = TestDataFactory.getInstance().getLedgers()[0];
+        AcctSeed__Accounting_Period__c period = [
+            SELECT Id, AcctSeed__Start_Date__c FROM AcctSeed__Accounting_Period__c
+            WHERE AcctSeed__Status__c = 'Open'
+            ORDER BY AcctSeed__Start_Date__c DESC LIMIT 1
+        ];
+
+        System.runAs(admin) {
+            insert new List<AcctSeed__Journal_Entry__c>{
+                new AcctSeed__Journal_Entry__c(
+                    AcctSeed__Journal_Date__c = period.AcctSeed__Start_Date__c,
+                    AcctSeed__Ledger__c = ledger.Id,
+                    AcctSeed__Accounting_Period__c = period.Id,
+                    AcctSeed__Status__c = 'In Process',
+                    AcctSeed__ExtId__c = 'pending-1',
+                    Ramp_Sync_Status__c = 'Pending'
+                ),
+                new AcctSeed__Journal_Entry__c(
+                    AcctSeed__Journal_Date__c = period.AcctSeed__Start_Date__c,
+                    AcctSeed__Ledger__c = ledger.Id,
+                    AcctSeed__Accounting_Period__c = period.Id,
+                    AcctSeed__Status__c = 'In Process',
+                    AcctSeed__ExtId__c = 'synced-1',
+                    Ramp_Sync_Status__c = 'Synced_To_Ramp'
+                ),
+                new AcctSeed__Journal_Entry__c(
+                    AcctSeed__Journal_Date__c = period.AcctSeed__Start_Date__c,
+                    AcctSeed__Ledger__c = ledger.Id,
+                    AcctSeed__Accounting_Period__c = period.Id,
+                    AcctSeed__Status__c = 'In Process',
+                    AcctSeed__ExtId__c = 'failed-1',
+                    Ramp_Sync_Status__c = 'Failed',
+                    Ramp_Sync_Error__c = 'Test failure'
+                )
+            };
+        }
+
+        Test.startTest();
+        Map<String, Integer> stats = RampConfigurationController.getTransactionSyncStats();
+        Test.stopTest();
+
+        System.assertEquals(1, stats.get('pending'));
+        System.assertEquals(1, stats.get('synced'));
+        System.assertEquals(1, stats.get('failed'));
+        System.assertEquals(3, stats.get('total'));
+    }
+
+    @IsTest
+    static void getRecentTransactionFailures_returnsFailedJEs() {
+        TestDataFactory.getInstance().initialize();
+        TestDataFactory.getInstance().disableAutoPost();
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        AcctSeed__Ledger__c ledger = TestDataFactory.getInstance().getLedgers()[0];
+        AcctSeed__Accounting_Period__c period = [
+            SELECT Id, AcctSeed__Start_Date__c FROM AcctSeed__Accounting_Period__c
+            WHERE AcctSeed__Status__c = 'Open'
+            ORDER BY AcctSeed__Start_Date__c DESC LIMIT 1
+        ];
+
+        System.runAs(admin) {
+            insert new AcctSeed__Journal_Entry__c(
+                AcctSeed__Journal_Date__c = period.AcctSeed__Start_Date__c,
+                AcctSeed__Ledger__c = ledger.Id,
+                AcctSeed__Accounting_Period__c = period.Id,
+                AcctSeed__Status__c = 'In Process',
+                AcctSeed__ExtId__c = 'failure-row',
+                AcctSeed__Reference__c = 'Failure memo',
+                Ramp_Sync_Status__c = 'Failed',
+                Ramp_Sync_Error__c = 'Synthesized error'
+            );
+        }
+
+        Test.startTest();
+        List<Map<String, Object>> rows = RampConfigurationController.getRecentTransactionFailures();
+        Test.stopTest();
+
+        System.assertEquals(1, rows.size());
+        System.assertEquals('failure-row', (String) rows[0].get('rampTransactionId'));
+        System.assertEquals('Synthesized error', (String) rows[0].get('error'));
+    }
+
+    /** Mock that always returns an empty page — used by syncTransactions_returnsJobId. */
+    private class EmptyPageMock implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"t","token_type":"Bearer","expires_in":864000,"scope":"transactions:read accounting:write"}');
+            } else {
+                res.setStatusCode(200);
+                res.setBody('{"data":[],"page":{"next":null}}');
+            }
             return res;
         }
     }

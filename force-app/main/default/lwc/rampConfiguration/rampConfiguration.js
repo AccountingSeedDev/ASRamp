@@ -13,6 +13,9 @@ import syncAccountingVariables from '@salesforce/apex/RampConfigurationControlle
 import getRampCustomFields from '@salesforce/apex/RampConfigurationController.getRampCustomFields';
 import updateRampCustomField from '@salesforce/apex/RampConfigurationController.updateRampCustomField';
 import deleteRampCustomField from '@salesforce/apex/RampConfigurationController.deleteRampCustomField';
+import syncTransactions from '@salesforce/apex/RampConfigurationController.syncTransactions';
+import getTransactionSyncStats from '@salesforce/apex/RampConfigurationController.getTransactionSyncStats';
+import getRecentTransactionFailures from '@salesforce/apex/RampConfigurationController.getRecentTransactionFailures';
 
 export default class RampConfiguration extends LightningElement {
     @track developerName = 'Default';
@@ -30,6 +33,16 @@ export default class RampConfiguration extends LightningElement {
     @track customFields = [];
     @track customFieldsLoading = false;
     @track draftValues = [];
+    @track transactionStats = { total: 0, synced: 0, pending: 0, failed: 0 };
+    @track transactionStatsLoading = false;
+    @track transactionFailures = [];
+
+    transactionFailureColumns = [
+        { label: 'Ramp Txn Id', fieldName: 'rampTransactionId', type: 'text', initialWidth: 280 },
+        { label: 'JE Name', fieldName: 'name', type: 'text' },
+        { label: 'Date', fieldName: 'date', type: 'date-local' },
+        { label: 'Error', fieldName: 'error', type: 'text', wrapText: true }
+    ];
 
     customFieldColumns = [
         { label: 'Ramp ID', fieldName: 'ramp_id', type: 'text', initialWidth: 320 },
@@ -83,6 +96,49 @@ export default class RampConfiguration extends LightningElement {
                 console.error('Error checking accounting connection:', error);
                 this.accountingConnectionStatus = false;
             });
+        // Always refresh transaction stats — they're useful even before the
+        // accounting connection is established.
+        this.loadTransactionStats();
+    }
+
+    get hasTransactionFailures() {
+        return this.transactionFailures && this.transactionFailures.length > 0;
+    }
+
+    loadTransactionStats() {
+        this.transactionStatsLoading = true;
+        Promise.all([getTransactionSyncStats(), getRecentTransactionFailures()])
+            .then(([stats, failures]) => {
+                this.transactionStats = stats || { total: 0, synced: 0, pending: 0, failed: 0 };
+                this.transactionFailures = failures || [];
+            })
+            .catch(error => {
+                console.error('Error loading transaction stats:', error);
+            })
+            .finally(() => {
+                this.transactionStatsLoading = false;
+            });
+    }
+
+    handleSyncTransactions() {
+        this.isLoading = true;
+        syncTransactions()
+            .then(result => {
+                this.showToast('Success', result, 'success');
+                // Stats won't reflect the new run immediately (Queueable runs
+                // async); user can hit Refresh after a minute.
+                this.loadTransactionStats();
+            })
+            .catch(error => {
+                this.showToast('Error', this.getErrorMessage(error), 'error');
+            })
+            .finally(() => {
+                this.isLoading = false;
+            });
+    }
+
+    handleRefreshTransactionStats() {
+        this.loadTransactionStats();
     }
 
     loadGLAccountStats() {
@@ -305,7 +361,8 @@ export default class RampConfiguration extends LightningElement {
 
         saveCredential({ credential })
             .then(result => {
-                this.showToast('Instructions', result, 'info', 'sticky');
+                this.showToast('Success', result, 'success');
+                this.hasExistingCredential = true;
             })
             .catch(error => {
                 this.showToast('Error', this.getErrorMessage(error), 'error');

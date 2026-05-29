@@ -8,8 +8,15 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
     private String accountingConnectionId;
     private Integer createdCount = 0;
     private Integer updatedCount = 0;
+    private Integer restoredCount = 0;
     private Integer errorCount = 0;
     private List<String> errors = new List<String>();
+
+    // Lazily-populated map of (SF Account Id -> Ramp vendor UUID) for vendors
+    // that already exist on Ramp's side. Used to skip duplicate POSTs after a
+    // tenant switch or local Ramp_Vendor_Id__c clear.
+    private Map<String, String> existingByOurId;
+    private Boolean existingMapLoaded = false;
 
     /**
      * @description Constructor - fetches accounting connection ID
@@ -52,19 +59,50 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
             return;
         }
 
-        // Separate accounts into those needing create vs update
+        // Lazy-load the "already on Ramp" map on first execute. One callout
+        // shared across all chunks since the class is Database.Stateful.
+        if (!existingMapLoaded) {
+            try {
+                existingByOurId = fetchExistingRampVendors();
+            } catch (Exception e) {
+                // Don't fail the run — treat Ramp as empty if discovery breaks.
+                System.debug(LoggingLevel.WARN, 'fetchExistingRampVendors failed: ' + e.getMessage());
+                existingByOurId = new Map<String, String>();
+            }
+            existingMapLoaded = true;
+        }
+
+        // Three buckets:
+        //   toUpdate  — local Ramp_Vendor_Id__c is set → PATCH
+        //   toRestore — Ramp already has a vendor with our SF Id but local pointer is null → re-stamp, no API
+        //   toCreate  — neither side has a record → POST
         List<Account> toCreate = new List<Account>();
         List<Account> toUpdate = new List<Account>();
+        List<Account> toRestore = new List<Account>();
 
         for (Account acc : scope) {
             if (String.isNotBlank(acc.Ramp_Vendor_Id__c)) {
                 toUpdate.add(acc);
+            } else if (existingByOurId.containsKey(acc.Id)) {
+                acc.Ramp_Vendor_Id__c = existingByOurId.get(acc.Id);
+                toRestore.add(acc);
             } else {
                 toCreate.add(acc);
             }
         }
 
-        // Process updates (one at a time via PATCH)
+        // Restamp locally — no callouts.
+        if (!toRestore.isEmpty()) {
+            try {
+                update toRestore;
+                restoredCount += toRestore.size();
+            } catch (Exception e) {
+                errorCount++;
+                errors.add('Restore batch: ' + e.getMessage());
+            }
+        }
+
+        // PATCH existing records.
         for (Account acc : toUpdate) {
             try {
                 updateVendor(acc);
@@ -75,7 +113,7 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
             }
         }
 
-        // Process creates (batch via POST, max 500)
+        // POST genuinely-new ones.
         if (!toCreate.isEmpty()) {
             try {
                 createVendors(toCreate);
@@ -88,12 +126,72 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
     }
 
     /**
+     * @description Paginates GET /accounting/vendors and returns a map keyed by
+     * the "id" we originally sent (= our Salesforce 18-char Id).
+     */
+    @TestVisible
+    private Map<String, String> fetchExistingRampVendors() {
+        Map<String, String> sfIdToRampId = new Map<String, String>();
+        String nextStart = null;
+        Integer pages = 0;
+
+        do {
+            String endpoint = '/developer/v1/accounting/vendors?page_size=100';
+            if (String.isNotBlank(nextStart)) {
+                endpoint += '&start=' + EncodingUtil.urlEncode(nextStart, 'UTF-8');
+            }
+
+            HttpResponse res = RampAPIService.get(endpoint);
+            if (res.getStatusCode() != 200) {
+                System.debug(LoggingLevel.WARN,
+                    'fetchExistingRampVendors page ' + pages + ' returned ' +
+                    res.getStatusCode() + ': ' + res.getBody());
+                break;
+            }
+
+            Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            List<Object> data = (List<Object>) body.get('data');
+            if (data != null) {
+                for (Object o : data) {
+                    Map<String, Object> v = (Map<String, Object>) o;
+                    String sfId = (String) v.get('id');
+                    String rampId = (String) v.get('ramp_id');
+                    Boolean isActive = (Boolean) v.get('is_active');
+                    Boolean active = (isActive == null) ? true : isActive;
+                    if (String.isNotBlank(sfId) && String.isNotBlank(rampId) && active) {
+                        sfIdToRampId.put(sfId, rampId);
+                    }
+                }
+            }
+
+            nextStart = extractNextCursor(body);
+            pages++;
+        } while (String.isNotBlank(nextStart) && pages < 50);
+
+        return sfIdToRampId;
+    }
+
+    private static String extractNextCursor(Map<String, Object> body) {
+        Map<String, Object> page = (Map<String, Object>) body.get('page');
+        if (page == null) return null;
+        String nextUrl = (String) page.get('next');
+        if (String.isBlank(nextUrl)) return null;
+        Integer i = nextUrl.indexOf('start=');
+        if (i < 0) return null;
+        String cursor = nextUrl.substring(i + 6);
+        Integer amp = cursor.indexOf('&');
+        if (amp >= 0) cursor = cursor.substring(0, amp);
+        return cursor;
+    }
+
+    /**
      * @description Finish method - log results
      */
     public void finish(Database.BatchableContext bc) {
         String summary = 'RampVendorSyncBatch completed.\n' +
                         'Created: ' + createdCount + '\n' +
                         'Updated: ' + updatedCount + '\n' +
+                        'Restored: ' + restoredCount + '\n' +
                         'Errors: ' + errorCount;
 
         if (!errors.isEmpty()) {
