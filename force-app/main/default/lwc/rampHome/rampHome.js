@@ -4,6 +4,8 @@ import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 import getHomeData from '@salesforce/apex/RampHomeController.getHomeData';
 import syncTransactions from '@salesforce/apex/RampConfigurationController.syncTransactions';
 import syncGLAccounts from '@salesforce/apex/RampConfigurationController.syncGLAccounts';
+import syncBills from '@salesforce/apex/RampConfigurationController.syncBills';
+import syncReimbursements from '@salesforce/apex/RampConfigurationController.syncReimbursements';
 
 const ICONS = {
     database: 'utility:database',
@@ -95,11 +97,29 @@ export default class RampHome extends LightningElement {
         if (!this.home) return [];
         const h = this.home;
         return [
-            { key: 'a', label: 'Records synced today', value: this._n(h.syncedToday), sub: this.setupComplete ? 'across active pipelines' : 'first sync pending', toneCls: 'kpi-sub good' },
+            { key: 'a', label: 'Records processed', value: this._n(h.recordsProcessed), sub: 'latest sync runs', toneCls: 'kpi-sub muted' },
             { key: 'b', label: 'GL accounts in sync', value: this._glSyncedLabel(), sub: 'master data', toneCls: 'kpi-sub muted' },
-            { key: 'c', label: 'Pending acknowledgment', value: this._n(h.pendingTotal), sub: h.pendingTotal ? 'awaiting Ramp ack' : 'all caught up', toneCls: h.pendingTotal ? 'kpi-sub warn' : 'kpi-sub good' },
-            { key: 'd', label: 'Records failed', value: this._n(h.failedTotal), sub: h.failedTotal ? 'need attention' : 'no failures', toneCls: h.failedTotal ? 'kpi-sub bad' : 'kpi-sub good' }
+            { key: 'c', label: 'Pending acknowledgement', value: this._n(h.pendingTotal), sub: h.pendingTotal ? 'awaiting Ramp acknowledgement' : 'all caught up', toneCls: h.pendingTotal ? 'kpi-sub warn' : 'kpi-sub good' },
+            { key: 'd', label: 'Need follow-up', value: this._n(h.failedTotal), sub: h.failedTotal ? 'records to resolve' : 'no failures', toneCls: h.failedTotal ? 'kpi-sub bad' : 'kpi-sub good' }
         ];
+    }
+
+    // ── recent sync runs (Automated Job Results) ──
+    get jobs() {
+        if (!this.home || !this.home.jobs) return [];
+        return this.home.jobs.map((j) => {
+            const st = STATUS[j.statusKind] || STATUS.notset;
+            return {
+                ...j,
+                pillCls: st.cls,
+                pillLabel: j.hasRun ? st.label : 'No runs yet',
+                processedN: this._n(j.processed),
+                succeededN: this._n(j.succeeded),
+                failedN: this._n(j.failed),
+                failedCls: j.failed ? 'jm-num bad' : 'jm-num muted',
+                lastRunLabel: j.lastRun ? new Date(j.lastRun).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '—'
+            };
+        });
     }
     _glSyncedLabel() {
         const m = this.home.pipelines.find((p) => p.id === 'master');
@@ -126,7 +146,8 @@ export default class RampHome extends LightningElement {
                 showSync: p.implemented && !!p.action,
                 syncDisabled: busy || !this.setupComplete,
                 syncLabel: busy ? 'Syncing' : 'Sync now',
-                notEnabled: !p.implemented
+                notEnabled: !p.implemented,
+                hasLastRun: !!p.lastRun
             };
         });
     }
@@ -148,8 +169,8 @@ export default class RampHome extends LightningElement {
         return [
             { key: 'm', name: 'Master data sync', cadence: 'Every 4 hours · weekdays', note: 'Manual today' },
             { key: 't', name: 'Card transactions', cadence: 'Every 4 hours · weekdays', note: 'Manual today' },
-            { key: 'b', name: 'Bills', cadence: 'Every 2 hours (recommended)', note: 'Not enabled' },
-            { key: 'r', name: 'Reimbursements', cadence: 'Every 4 hours (recommended)', note: 'Not enabled' }
+            { key: 'b', name: 'Bills', cadence: 'Every 2 hours (recommended)', note: 'Manual today' },
+            { key: 'r', name: 'Reimbursements', cadence: 'Every 4 hours (recommended)', note: 'Manual today' }
         ];
     }
 
@@ -164,13 +185,18 @@ export default class RampHome extends LightningElement {
     handleSyncAll() {
         this._run('master', 'syncGL');
         this._run('txn', 'syncTxn');
+        this._run('bill', 'syncBill');
+        this._run('reimb', 'syncReimb');
     }
-    handleRetry() { this._run('txn', 'syncTxn'); }
     handleRefresh() { refreshApex(this.wiredResult); }
 
     _run(id, action) {
         if (this.busy[id]) return;
-        const fn = action === 'syncGL' ? syncGLAccounts : action === 'syncTxn' ? syncTransactions : null;
+        const fn = action === 'syncGL' ? syncGLAccounts
+            : action === 'syncTxn' ? syncTransactions
+            : action === 'syncBill' ? syncBills
+            : action === 'syncReimb' ? syncReimbursements
+            : null;
         if (!fn) return;
         this.busy = { ...this.busy, [id]: true };
         fn()

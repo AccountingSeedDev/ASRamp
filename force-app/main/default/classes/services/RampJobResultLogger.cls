@@ -13,6 +13,7 @@ public with sharing class RampJobResultLogger {
 
     public static final String JOB_CARD_SYNC = 'Ramp Card Transaction Sync';
     public static final String JOB_BILL_SYNC = 'Ramp Bill Sync';
+    public static final String JOB_REIMBURSEMENT_SYNC = 'Ramp Reimbursement Sync';
 
     private static final Integer NOTES_MAX = 30000;
 

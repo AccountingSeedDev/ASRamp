@@ -123,6 +123,9 @@
                                     </div>
                                 </template>
                             </div>
+                            <template lwc:if={p.hasLastRun}>
+                                <div class="pcard-lastrun">{p.lastRun}</div>
+                            </template>
                         </template>
 
                         <div class="pcard-foot">
@@ -136,6 +139,30 @@
                                 </button>
                             </template>
                         </div>
+                    </div>
+                </template>
+            </div>
+
+            <!-- ───────── recent sync runs (Automated Job Results) ───────── -->
+            <div class="sec-label">
+                <lightning-icon icon-name="utility:metrics" size="x-small"></lightning-icon>
+                <span>Recent sync runs</span>
+                <div class="spacer"></div>
+                <span class="sec-hint">from Automated Job Results</span>
+            </div>
+            <div class="jgrid">
+                <template for:each={jobs} for:item="j">
+                    <div key={j.jobType} class="jcard">
+                        <div class="jcard-top">
+                            <span class="jcard-name">{j.label}</span>
+                            <span class={j.pillCls}>{j.pillLabel}</span>
+                        </div>
+                        <div class="jcard-nums">
+                            <div class="jm"><div class="jm-num">{j.processedN}</div><div class="jm-label">Processed</div></div>
+                            <div class="jm"><div class="jm-num good">{j.succeededN}</div><div class="jm-label">Succeeded</div></div>
+                            <div class="jm"><div class={j.failedCls}>{j.failedN}</div><div class="jm-label">Failed</div></div>
+                        </div>
+                        <div class="jcard-foot">Last run: {j.lastRunLabel}</div>
                     </div>
                 </template>
             </div>
@@ -167,7 +194,7 @@
                                             <td class="mono">{f.rampId}</td>
                                             <td class="reason">{f.error}</td>
                                             <td class="ta-r">
-                                                <button class="btn btn-neutral sm" onclick={handleRetry}>
+                                                <button class="btn btn-neutral sm" data-id={f.pipe} data-action={f.action} onclick={handlePipeSync}>
                                                     <lightning-icon icon-name="utility:redo" size="xx-small"></lightning-icon>
                                                     <span>Retry</span>
                                                 </button>

@@ -428,9 +428,37 @@ public with sharing class RampConfigurationController {
             Id jobId = System.enqueueJob(new RampTransactionSyncQueueable());
             return 'Transaction sync started. Job Id: ' + jobId +
                 '. The job will drain all SYNC_READY transactions across pages and ' +
-                'POST sync acknowledgments back to Ramp.';
+                'POST sync acknowledgements back to Ramp.';
         } catch (Exception e) {
             throw new AuraHandledException('Error starting transaction sync: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Kicks off Pipeline 2 — bills → Account Payables (+ payments).
+     */
+    @AuraEnabled
+    public static String syncBills() {
+        try {
+            Id jobId = System.enqueueJob(new RampBillSyncQueueable());
+            return 'Bill sync started. Job Id: ' + jobId +
+                '. Drains sync-ready bills across pages, creating Payables (and Cash Disbursements for paid bills).';
+        } catch (Exception e) {
+            throw new AuraHandledException('Error starting bill sync: ' + e.getMessage());
+        }
+    }
+
+    /**
+     * @description Kicks off Pipeline 3 — reimbursements → employee Payables (+ payments).
+     */
+    @AuraEnabled
+    public static String syncReimbursements() {
+        try {
+            Id jobId = System.enqueueJob(new RampReimbursementSyncQueueable());
+            return 'Reimbursement sync started. Job Id: ' + jobId +
+                '. Drains SYNC_READY reimbursements across pages, creating employee Payables.';
+        } catch (Exception e) {
+            throw new AuraHandledException('Error starting reimbursement sync: ' + e.getMessage());
         }
     }
 

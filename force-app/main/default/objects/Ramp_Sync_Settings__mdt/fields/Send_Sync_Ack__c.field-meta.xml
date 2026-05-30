@@ -4,6 +4,6 @@
     <defaultValue>true</defaultValue>
     <description>When checked, after creating Journal Entries the sync POSTs an acknowledgement to Ramp&apos;s /accounting/syncs endpoint, which marks the transactions SYNCED in Ramp. Uncheck to leave transactions SYNC_READY (useful for repeatable testing).</description>
     <fieldManageability>SubscriberControlled</fieldManageability>
-    <label>Send Sync Ack to Ramp</label>
+    <label>Send Sync Acknowledgement to Ramp</label>
     <type>Checkbox</type>
 </CustomField>
