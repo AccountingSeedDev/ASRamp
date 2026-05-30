@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <label>Ramp Bill Payment Bank</label>
+    <protected>false</protected>
+    <values>
+        <field>AcctSeed__Allowed_GL_Types__c</field>
+        <value xsi:type="xsd:string">Balance Sheet</value>
+    </values>
+    <values>
+        <field>AcctSeed__Allowed_GL_Sub_Type_1__c</field>
+        <value xsi:type="xsd:string">Any</value>
+    </values>
+    <values>
+        <field>AcctSeed__Bank_Restriction__c</field>
+        <value xsi:type="xsd:string">No Restriction</value>
+    </values>
+    <values>
+        <field>AcctSeed__Cash_Flow_Category_Restriction__c</field>
+        <value xsi:type="xsd:string">No Restriction</value>
+    </values>
+    <values>
+        <field>AcctSeed__Type__c</field>
+        <value xsi:type="xsd:string">User Defined</value>
+    </values>
+    <values>
+        <field>AcctSeed__Required__c</field>
+        <value xsi:type="xsd:boolean">false</value>
+    </values>
+    <values>
+        <field>AcctSeed__Help_Text__c</field>
+        <value xsi:type="xsd:string">Bank/cash GL Account credited when a paid Ramp bill posts a Cash Disbursement.</value>
+    </values>
+</CustomMetadata>

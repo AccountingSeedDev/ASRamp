@@ -180,6 +180,16 @@ private class RampTransactionServiceTest {
 
         Integer count = [SELECT COUNT() FROM AcctSeed__Journal_Entry_Line__c WHERE AcctSeed__ExtId__c = 'ramp-txn-success-1:cr'];
         System.assertEquals(1, count, 'Queueable should drive the same syncPage flow and persist the clearing line');
+
+        // The run logs an Automated Job Result.
+        List<AcctSeed__Automated_Job_Results__c> ajrs = [
+            SELECT AcctSeed__Processed__c, AcctSeed__Succeeded__c, AcctSeed__Failed__c
+            FROM AcctSeed__Automated_Job_Results__c WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_CARD_SYNC
+        ];
+        System.assertEquals(1, ajrs.size(), 'Queueable should log one Automated Job Result');
+        System.assertEquals(1, ajrs[0].AcctSeed__Processed__c);
+        System.assertEquals(1, ajrs[0].AcctSeed__Succeeded__c);
+        System.assertEquals(0, ajrs[0].AcctSeed__Failed__c);
     }
 
     // --------------------------------------------------------------------

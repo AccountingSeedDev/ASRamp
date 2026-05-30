@@ -17,7 +17,10 @@ public with sharing class RampSyncSettingsService {
 
     public static final String SPEC_CARD_CLEARING = 'Ramp_Card_Clearing';
     public static final String SPEC_SUSPENSE = 'Ramp_Suspense';
-    private static final Set<String> RAMP_SPECS = new Set<String>{ SPEC_CARD_CLEARING, SPEC_SUSPENSE };
+    public static final String SPEC_BILL_PAYMENT_BANK = 'Ramp_Bill_Payment_Bank';
+    private static final Set<String> RAMP_SPECS = new Set<String>{
+        SPEC_CARD_CLEARING, SPEC_SUSPENSE, SPEC_BILL_PAYMENT_BANK
+    };
 
     // Sync_Grouping__c picklist values — how transactions collapse into JEs.
     public static final String GROUPING_DAILY = 'Daily';
@@ -114,6 +117,28 @@ public with sharing class RampSyncSettingsService {
      */
     public static Id getSuspenseGLId() {
         return getGLDefaultsBySpec().get(SPEC_SUSPENSE);
+    }
+
+    /**
+     * @description The bank/cash GL credited when a paid Ramp bill posts a Cash
+     * Disbursement. Resolved from the "Ramp Bill Payment Bank" default GL Account
+     * on the sync ledger. Required for Phase 2b — throws if unset.
+     */
+    /** Non-throwing variant — null when the bank GL default isn't configured. */
+    public static Id getBillPaymentBankGLIdOrNull() {
+        return getGLDefaultsBySpec().get(SPEC_BILL_PAYMENT_BANK);
+    }
+
+    public static Id getBillPaymentBankGLId() {
+        Id glId = getGLDefaultsBySpec().get(SPEC_BILL_PAYMENT_BANK);
+        if (glId == null) {
+            throw new RampSyncSettingsException(
+                'No "Ramp Bill Payment Bank" GL Account is configured for the sync ledger. ' +
+                'In Accounting Home > Setup > Configurations > Default GL Accounts, select the ledger ' +
+                'and set the "Ramp Bill Payment Bank" default GL Account.'
+            );
+        }
+        return glId;
     }
 
     public static String getDefaultJEStatus() {
