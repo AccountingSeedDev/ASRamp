@@ -6,6 +6,15 @@ import syncTransactions from '@salesforce/apex/RampConfigurationController.syncT
 import syncGLAccounts from '@salesforce/apex/RampConfigurationController.syncGLAccounts';
 import syncBills from '@salesforce/apex/RampConfigurationController.syncBills';
 import syncReimbursements from '@salesforce/apex/RampConfigurationController.syncReimbursements';
+import schedulePipeline from '@salesforce/apex/RampHomeController.schedulePipeline';
+import unschedulePipeline from '@salesforce/apex/RampHomeController.unschedulePipeline';
+
+const FREQ_OPTIONS = [
+    { label: 'Hourly', value: 'HOURLY' },
+    { label: 'Every 6 hours', value: 'EVERY_6H' },
+    { label: 'Daily', value: 'DAILY' },
+    { label: 'Weekdays', value: 'WEEKDAYS' }
+];
 
 const ICONS = {
     database: 'utility:database',
@@ -25,6 +34,10 @@ export default class RampHome extends LightningElement {
     @track home;
     @track busy = {};
     @track lowerTab = 'errors';
+    @track scheduleFor = null;   // pipeline id whose scheduler panel is open
+    @track schedFreq = 'HOURLY';
+    @track schedHour = '1';
+    @track schedBusy = false;
     wiredResult;
     error;
 
@@ -147,10 +160,30 @@ export default class RampHome extends LightningElement {
                 syncDisabled: busy || !this.setupComplete,
                 syncLabel: busy ? 'Syncing' : 'Sync now',
                 notEnabled: !p.implemented,
-                hasLastRun: !!p.lastRun
+                hasLastRun: !!p.lastRun,
+                scheduleOpen: this.scheduleFor === p.id,
+                schedActive: !!p.scheduled,
+                schedSummary: p.scheduleSummary,
+                schedNext: p.nextRun ? new Date(p.nextRun).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : null,
+                schedBtnLabel: p.scheduled ? 'Edit schedule' : 'Schedule'
             };
         });
     }
+
+    // ── scheduler ──
+    get freqOptions() {
+        return FREQ_OPTIONS.map((o) => ({ ...o, selected: o.value === this.schedFreq }));
+    }
+    get hourOptions() {
+        const out = [];
+        for (let h = 0; h < 24; h++) {
+            const suffix = h < 12 ? 'AM' : 'PM';
+            let h12 = h % 12; if (h12 === 0) h12 = 12;
+            out.push({ value: String(h), label: `${h12}:00 ${suffix}`, selected: String(h) === this.schedHour });
+        }
+        return out;
+    }
+    get showHour() { return this.schedFreq === 'DAILY' || this.schedFreq === 'WEEKDAYS'; }
 
     get failures() { return this.home ? this.home.failures : []; }
     get hasFailures() { return this.failures.length > 0; }
@@ -189,6 +222,34 @@ export default class RampHome extends LightningElement {
         this._run('reimb', 'syncReimb');
     }
     handleRefresh() { refreshApex(this.wiredResult); }
+
+    // ── scheduler actions ──
+    openSchedule(e) {
+        const id = e.currentTarget.dataset.id;
+        this.scheduleFor = id;
+        this.schedFreq = 'HOURLY';
+        this.schedHour = '1';
+    }
+    closeSchedule() { this.scheduleFor = null; }
+    onFreqChange(e) { this.schedFreq = e.target.value; }
+    onHourChange(e) { this.schedHour = e.target.value; }
+
+    saveSchedule(e) {
+        const id = e.currentTarget.dataset.id;
+        this.schedBusy = true;
+        schedulePipeline({ pipelineId: id, frequency: this.schedFreq, hour: parseInt(this.schedHour, 10) })
+            .then((msg) => { this._toast('Schedule saved', msg, 'success'); this.scheduleFor = null; })
+            .catch((err) => this._toast('Error', this._msg(err), 'error'))
+            .finally(() => { this.schedBusy = false; refreshApex(this.wiredResult); });
+    }
+    clearSchedule(e) {
+        const id = e.currentTarget.dataset.id;
+        this.schedBusy = true;
+        unschedulePipeline({ pipelineId: id })
+            .then((msg) => { this._toast('Schedule cleared', msg, 'success'); this.scheduleFor = null; })
+            .catch((err) => this._toast('Error', this._msg(err), 'error'))
+            .finally(() => { this.schedBusy = false; refreshApex(this.wiredResult); });
+    }
 
     _run(id, action) {
         if (this.busy[id]) return;

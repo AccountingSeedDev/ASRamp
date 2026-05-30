@@ -128,9 +128,23 @@
                             </template>
                         </template>
 
+                        <template lwc:if={p.schedActive}>
+                            <div class="sched-chip">
+                                <lightning-icon icon-name="utility:clock" size="xx-small"></lightning-icon>
+                                <span>{p.schedSummary}</span>
+                                <template lwc:if={p.schedNext}><span class="sched-next">· next {p.schedNext}</span></template>
+                            </div>
+                        </template>
+
                         <div class="pcard-foot">
                             <span class="records">{p.records}</span>
                             <div class="spacer"></div>
+                            <template lwc:if={p.implemented}>
+                                <button class="btn btn-neutral sm" data-id={p.id} onclick={openSchedule}>
+                                    <lightning-icon icon-name="utility:clock" size="xx-small"></lightning-icon>
+                                    <span>{p.schedBtnLabel}</span>
+                                </button>
+                            </template>
                             <template lwc:if={p.showSync}>
                                 <button class="btn btn-secondary sm" data-id={p.id} data-action={p.action}
                                         onclick={handlePipeSync} disabled={p.syncDisabled}>
@@ -139,6 +153,36 @@
                                 </button>
                             </template>
                         </div>
+
+                        <template lwc:if={p.scheduleOpen}>
+                            <div class="sched-panel">
+                                <div class="sched-row">
+                                    <label class="sched-label">Frequency</label>
+                                    <select class="sched-select" onchange={onFreqChange}>
+                                        <template for:each={freqOptions} for:item="o">
+                                            <option key={o.value} value={o.value} selected={o.selected}>{o.label}</option>
+                                        </template>
+                                    </select>
+                                </div>
+                                <template lwc:if={showHour}>
+                                    <div class="sched-row">
+                                        <label class="sched-label">Time of day</label>
+                                        <select class="sched-select" onchange={onHourChange}>
+                                            <template for:each={hourOptions} for:item="o">
+                                                <option key={o.value} value={o.value} selected={o.selected}>{o.label}</option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                </template>
+                                <div class="sched-actions">
+                                    <button class="btn btn-secondary sm" data-id={p.id} onclick={saveSchedule} disabled={schedBusy}>Save schedule</button>
+                                    <template lwc:if={p.schedActive}>
+                                        <button class="btn btn-danger sm" data-id={p.id} onclick={clearSchedule} disabled={schedBusy}>Clear</button>
+                                    </template>
+                                    <button class="btn btn-neutral sm" onclick={closeSchedule}>Cancel</button>
+                                </div>
+                            </div>
+                        </template>
                     </div>
                 </template>
             </div>

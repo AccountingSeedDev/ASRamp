@@ -34,6 +34,10 @@ public with sharing class RampHomeController {
         @AuraEnabled public String blurb;
         @AuraEnabled public String action;
         @AuraEnabled public String lastRun;   // AJR last-run summary
+        @AuraEnabled public Boolean scheduled = false;
+        @AuraEnabled public String scheduleSummary;
+        @AuraEnabled public Datetime nextRun;
+        @AuraEnabled public String cron;
     }
 
     public class Step {
@@ -139,12 +143,119 @@ public with sharing class RampHomeController {
             d.setupComplete = doneCount == d.steps.size();
 
             d.pipelines = buildPipelines(glTotal, glSynced, glPending, varCount, tx, bill, reimb, ajr);
+
+            // Attach per-pipeline scheduled-job state.
+            Map<String, CronTrigger> sched = scheduledByPipeline();
+            for (Pipeline p : d.pipelines) {
+                CronTrigger ct = sched.get(p.id);
+                if (ct != null) {
+                    p.scheduled = true;
+                    p.nextRun = ct.NextFireTime;
+                    p.cron = ct.CronExpression;
+                    p.scheduleSummary = summarizeCron(ct.CronExpression);
+                }
+            }
+
             d.failures = recentFailures();
             return d;
         } catch (Exception e) {
             throw new AuraHandledException('Error loading Ramp home: ' + e.getMessage());
         }
     }
+
+    // ───────────────────────── scheduling ─────────────────────────
+    private static final Map<String, String> PIPE_LABELS = new Map<String, String>{
+        'master' => 'Master data sync', 'txn' => 'Card transactions', 'bill' => 'Bills', 'reimb' => 'Reimbursements'
+    };
+
+    /**
+     * @description Schedule (or re-schedule) a pipeline's sync. Any existing
+     * schedule for the pipeline is aborted and replaced with the new cadence.
+     * @param frequency HOURLY | EVERY_6H | DAILY | WEEKDAYS
+     * @param hour      hour-of-day 0–23 for DAILY/WEEKDAYS (ignored otherwise)
+     */
+    @AuraEnabled
+    public static String schedulePipeline(String pipelineId, String frequency, Integer hour) {
+        try {
+            String pid = requirePipeline(pipelineId);
+            Integer hr = (hour == null) ? 1 : Math.mod(hour, 24);
+            String cron = buildCron(frequency, hr);
+            // Replace any existing schedule, then schedule under a fresh unique
+            // name (avoids the same-name "already scheduled" race in one txn).
+            abortExisting(pid);
+            String name = 'Ramp Sync - ' + pid + ' - ' + RampTransactionService.newRunId();
+            System.schedule(name, cron, new RampSyncSchedulable(pid));
+            return 'Scheduled ' + PIPE_LABELS.get(pid) + ' — ' + summarizeCron(cron) + '.';
+        } catch (Exception e) {
+            throw new AuraHandledException('Could not schedule: ' + e.getMessage());
+        }
+    }
+
+    /** @description Remove a pipeline's scheduled job. */
+    @AuraEnabled
+    public static String unschedulePipeline(String pipelineId) {
+        try {
+            String pid = requirePipeline(pipelineId);
+            Integer n = abortExisting(pid);
+            return n > 0 ? 'Cleared schedule for ' + PIPE_LABELS.get(pid) + '.' : 'No schedule found for ' + PIPE_LABELS.get(pid) + '.';
+        } catch (Exception e) {
+            throw new AuraHandledException('Could not clear schedule: ' + e.getMessage());
+        }
+    }
+
+    private static String requirePipeline(String pid) {
+        if (!PIPE_LABELS.containsKey(pid)) throw new RampHomeException('Unknown pipeline: ' + pid);
+        return pid;
+    }
+    private static Integer abortExisting(String pid) {
+        String namePattern = 'Ramp Sync - ' + pid + '%';
+        Integer n = 0;
+        for (CronTrigger ct : [SELECT Id FROM CronTrigger WHERE CronJobDetail.Name LIKE :namePattern]) {
+            System.abortJob(ct.Id); n++;
+        }
+        return n;
+    }
+
+    private static String buildCron(String frequency, Integer hour) {
+        if (frequency == 'HOURLY') return '0 0 * * * ?';
+        if (frequency == 'EVERY_6H') return '0 0 0,6,12,18 * * ?';
+        if (frequency == 'WEEKDAYS') return '0 0 ' + hour + ' ? * MON-FRI';
+        return '0 0 ' + hour + ' * * ?'; // DAILY (default)
+    }
+
+    private static String summarizeCron(String cron) {
+        if (cron == '0 0 * * * ?') return 'Hourly';
+        if (cron == '0 0 0,6,12,18 * * ?') return 'Every 6 hours';
+        List<String> parts = cron.split(' ');
+        if (parts.size() >= 6) {
+            String hr = formatHour(parts[2]);
+            return parts[5] == 'MON-FRI' ? 'Weekdays at ' + hr : 'Daily at ' + hr;
+        }
+        return 'Custom schedule';
+    }
+    private static String formatHour(String hh) {
+        try {
+            Integer h = Integer.valueOf(hh);
+            String suffix = h < 12 ? 'AM' : 'PM';
+            Integer h12 = Math.mod(h, 12); if (h12 == 0) h12 = 12;
+            return h12 + ' ' + suffix;
+        } catch (Exception e) { return hh + ':00'; }
+    }
+
+    private static Map<String, CronTrigger> scheduledByPipeline() {
+        Map<String, CronTrigger> m = new Map<String, CronTrigger>();
+        for (CronTrigger ct : [
+            SELECT Id, CronJobDetail.Name, NextFireTime, State, CronExpression
+            FROM CronTrigger WHERE CronJobDetail.Name LIKE 'Ramp Sync - %'
+        ]) {
+            // Name = 'Ramp Sync - <pid> - <epoch>' → pid is the segment after the prefix.
+            String pid = ct.CronJobDetail.Name.substringAfter('Ramp Sync - ').substringBefore(' - ');
+            m.put(pid, ct);
+        }
+        return m;
+    }
+
+    public class RampHomeException extends Exception {}
 
     // ───────────────────────── stats helpers ─────────────────────────
     private static Integer nz(Integer i) { return i == null ? 0 : i; }
