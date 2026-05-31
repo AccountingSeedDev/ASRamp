@@ -77,7 +77,8 @@
 .setup-bar { height: 5px; border-radius: 999px; background: rgba(255,255,255,.16); margin: 16px 0 0; overflow: hidden; }
 .setup-bar-fill { height: 100%; background: #1AA2DC; border-radius: 999px; transition: width .5s ease; }
 .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 16px; }
-.step-chip { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 9px; padding: 11px 12px; }
+.step-chip { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 9px; padding: 11px 12px; text-align: left; width: 100%; cursor: pointer; font-family: var(--font); transition: background .12s, border-color .12s; }
+button.step-chip:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.28); }
 .step-current { background: rgba(26,162,220,.18); border-color: #1AA2DC; }
 .step-badge { width: 20px; height: 20px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; }
 .step-badge-done { background: #41A658; }
@@ -214,3 +215,24 @@
 .sched-label { font-size: 12px; font-weight: 600; color: var(--as-muted); width: 92px; flex: 0 0 auto; }
 .sched-select { flex: 1; font-family: var(--font); font-size: 13px; color: var(--as-body); background: #fff; border: 1px solid var(--as-line2); border-radius: 6px; padding: 7px 9px; }
 .sched-actions { display: flex; gap: 8px; }
+
+/* ── inline link button (e.g. "Manage configuration") ── */
+.link-btn { background: none; border: none; padding: 0; margin: 0; font-family: var(--font); font-size: inherit; font-weight: 600; color: var(--as-primary-500); cursor: pointer; text-decoration: underline; }
+.link-btn:hover { color: var(--as-primary-700); }
+
+/* ── configuration modal ── */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(15,28,48,.45); display: flex; align-items: center; justify-content: center; z-index: 9000; padding: 24px; }
+.modal-panel { background: var(--as-surface2); width: min(1040px, 100%); max-height: 90vh; border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.32); display: flex; flex-direction: column; overflow: hidden; }
+.modal-hdr { display: flex; align-items: center; gap: 14px; padding: 18px 22px; background: #fff; border-bottom: 1px solid var(--as-line); }
+.modal-title-wrap { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+.modal-title { font-size: 17px; font-weight: 600; color: var(--as-primary); }
+.modal-sub { font-size: 12.5px; color: var(--as-muted); margin-top: 2px; }
+.modal-close { background: var(--as-surface2); border: none; width: 34px; height: 34px; border-radius: 8px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.modal-close:hover { background: var(--as-line); }
+.modal-body { flex: 1; overflow-y: auto; padding: 8px 14px 14px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px; background: #fff; border-top: 1px solid var(--as-line); }
+
+@media (max-width: 720px) {
+    .modal-panel { max-height: 96vh; }
+    .modal-sub { display: none; }
+}

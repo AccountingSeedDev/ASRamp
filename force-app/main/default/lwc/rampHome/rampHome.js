@@ -30,10 +30,21 @@ const STATUS = {
     notset: { label: 'Not set up', cls: 'pill pill-muted' }
 };
 
+// Maps a setup step to the rampConfiguration tab that completes it.
+const STEP_TAB = {
+    connect: 'authorization',
+    acctconn: 'authorization',
+    master: 'glaccounts',
+    settings: 'glaccounts',
+    firstrun: 'glaccounts'
+};
+
 export default class RampHome extends LightningElement {
     @track home;
     @track busy = {};
     @track lowerTab = 'errors';
+    @track showConfig = false;        // configuration modal open?
+    @track configTab = 'authorization';
     @track scheduleFor = null;   // pipeline id whose scheduler panel is open
     @track schedFreq = 'HOURLY';
     @track schedHour = '1';
@@ -87,9 +98,17 @@ export default class RampHome extends LightningElement {
             n: i + 1,
             isDone: s.state === 'done',
             isCurrent: s.state === 'current',
+            tab: STEP_TAB[s.id] || 'authorization',
             cls: `step-chip step-${s.state}`,
             badgeCls: `step-badge step-badge-${s.state}`
         }));
+    }
+
+    // Tab the "Continue setup" button should jump to (the first unfinished step).
+    get nextStepTab() {
+        if (!this.home) return 'authorization';
+        const s = this.home.steps.find((x) => x.state === 'current');
+        return s ? (STEP_TAB[s.id] || 'authorization') : 'authorization';
     }
 
     get healthHealthy() { return this.home && this.home.failedTotal === 0; }
@@ -209,6 +228,23 @@ export default class RampHome extends LightningElement {
 
     // ── actions ──
     selectTab(e) { this.lowerTab = e.currentTarget.dataset.id; }
+
+    // ── configuration modal ──
+    openConfig(e) {
+        const tab = (e && e.currentTarget && e.currentTarget.dataset.tab) || 'authorization';
+        this.configTab = tab;
+        this.showConfig = true;
+    }
+    openConfigNext() {
+        this.configTab = this.nextStepTab;
+        this.showConfig = true;
+    }
+    stopProp(e) { e.stopPropagation(); }
+    closeConfig() {
+        this.showConfig = false;
+        // Reflect anything saved in config (credential, GL sync, settings).
+        refreshApex(this.wiredResult);
+    }
 
     handlePipeSync(e) {
         const id = e.currentTarget.dataset.id;

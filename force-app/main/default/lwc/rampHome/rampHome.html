@@ -26,6 +26,10 @@
                 <lightning-icon icon-name="utility:refresh" size="x-small" alternative-text="Refresh"></lightning-icon>
                 <span>Refresh</span>
             </button>
+            <button class="btn btn-neutral" data-tab="authorization" onclick={openConfig}>
+                <lightning-icon icon-name="utility:settings" size="x-small" alternative-text="Configure"></lightning-icon>
+                <span>Configure</span>
+            </button>
             <button class="btn btn-primary" onclick={handleSyncAll} disabled={syncAllDisabled}>
                 <lightning-icon icon-name="utility:flow" size="x-small" variant="inverse" alternative-text=""></lightning-icon>
                 <span>{syncAllLabel}</span>
@@ -45,12 +49,12 @@
                             <div class="setup-title">Let’s connect Ramp to Accounting Seed</div>
                             <div class="setup-sub">{doneCountLabel} · Up next: <strong>{nextStepTitle}</strong></div>
                         </div>
-                        <button class="btn btn-cyan">Continue setup</button>
+                        <button class="btn btn-cyan" onclick={openConfigNext}>Continue setup</button>
                     </div>
                     <div class="setup-bar"><div class="setup-bar-fill" style={progressStyle}></div></div>
                     <div class="steps">
                         <template for:each={steps} for:item="s">
-                            <div key={s.id} class={s.cls}>
+                            <button key={s.id} class={s.cls} data-tab={s.tab} onclick={openConfig}>
                                 <div class={s.badgeCls}>
                                     <template lwc:if={s.isDone}>&#10003;</template>
                                     <template lwc:else>{s.n}</template>
@@ -59,7 +63,7 @@
                                     <div class="step-title">{s.title}</div>
                                     <div class="step-desc">{s.descr}</div>
                                 </div>
-                            </div>
+                            </button>
                         </template>
                     </div>
                 </div>
@@ -267,7 +271,7 @@
                                 </div>
                             </template>
                         </div>
-                        <div class="hint-note">Posting configuration lives in <span class="mono">Ramp_Sync_Settings__mdt</span> and the GL Account Specification metadata. Manage it from the Ramp Configuration tab.</div>
+                        <div class="hint-note">Posting configuration lives in <span class="mono">Ramp_Sync_Settings__mdt</span> and the GL Account Specification metadata. <button class="link-btn" data-tab="glaccounts" onclick={openConfig}>Manage configuration</button></div>
                     </template>
 
                     <!-- schedule -->
@@ -288,5 +292,31 @@
                 </div>
             </div>
         </div>
+
+        <!-- ───────── configuration modal ───────── -->
+        <template lwc:if={showConfig}>
+            <div class="modal-backdrop" onclick={closeConfig}>
+                <div class="modal-panel" onclick={stopProp} role="dialog" aria-modal="true" aria-label="Ramp configuration">
+                    <header class="modal-hdr">
+                        <div class="modal-title-wrap">
+                            <lightning-icon icon-name="utility:settings" size="small"></lightning-icon>
+                            <div>
+                                <div class="modal-title">Setup &amp; configuration</div>
+                                <div class="modal-sub">Authorize, map master data and tune posting — without leaving the dashboard.</div>
+                            </div>
+                        </div>
+                        <button class="modal-close" onclick={closeConfig} title="Close" aria-label="Close">
+                            <lightning-icon icon-name="utility:close" size="small"></lightning-icon>
+                        </button>
+                    </header>
+                    <div class="modal-body">
+                        <c-ramp-configuration active-tab={configTab}></c-ramp-configuration>
+                    </div>
+                    <footer class="modal-foot">
+                        <button class="btn btn-primary" onclick={closeConfig}>Done</button>
+                    </footer>
+                </div>
+            </div>
+        </template>
     </div>
 </template>

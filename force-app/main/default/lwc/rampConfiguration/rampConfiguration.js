@@ -1,4 +1,4 @@
-import { LightningElement, wire, track } from 'lwc';
+import { LightningElement, wire, track, api } from 'lwc';
 import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 import getActiveCredential from '@salesforce/apex/RampConfigurationController.getActiveCredential';
 import testConnection from '@salesforce/apex/RampConfigurationController.testConnection';
@@ -18,6 +18,9 @@ import getTransactionSyncStats from '@salesforce/apex/RampConfigurationControlle
 import getRecentTransactionFailures from '@salesforce/apex/RampConfigurationController.getRecentTransactionFailures';
 
 export default class RampConfiguration extends LightningElement {
+    // Optional deep-link target tab (set by a host such as rampHome). Defaults
+    // to Authorization so the standalone tab behaves exactly as before.
+    @api activeTab = 'authorization';
     @track developerName = 'Default';
     @track label = 'Default';
     @track clientId = '';
@@ -96,9 +99,6 @@ export default class RampConfiguration extends LightningElement {
                 console.error('Error checking accounting connection:', error);
                 this.accountingConnectionStatus = false;
             });
-        // Always refresh transaction stats — they're useful even before the
-        // accounting connection is established.
-        this.loadTransactionStats();
     }
 
     get hasTransactionFailures() {
