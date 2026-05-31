@@ -1,9 +1,9 @@
 /**
- * @description Pipeline 2 — fetch one page of sync-ready Ramp bills and post them
- * into Accounting Seed. Two phases per the ERP guide's decision table, driven by
+ * @description Fetch one page of sync-ready Ramp bills and post them
+ * into Accounting Seed. Two stages per the ERP guide's decision table, driven by
  * each bill's sync_status + status:
- *   - Phase 2a (BILL_SYNC): bill → Account_Payable__c + lines.
- *   - Phase 2b (BILL_PAYMENT_SYNC): a PAID bill also → Cash Disbursement (in a
+ *   - BILL_SYNC: bill → Account_Payable__c + lines.
+ *   - BILL_PAYMENT_SYNC: a PAID bill also → Cash Disbursement (in a
  *     per-period batch) + AP Disbursement, clearing the payable.
  *
  * Fetches sync_ready=true (everything with outstanding export work) and decides
@@ -78,7 +78,7 @@ public with sharing class RampBillService {
             }
         }
 
-        // ---- Phase 2b: batches → cash disbursements → AP disbursements ----
+        // ---- Payment stage: batches → cash disbursements → AP disbursements ----
         // Only for paid builds whose payable succeeded.
         List<RampBillBuilder.PayableBuild> payable2b = new List<RampBillBuilder.PayableBuild>();
         for (RampBillBuilder.PayableBuild pb : build.successful) {

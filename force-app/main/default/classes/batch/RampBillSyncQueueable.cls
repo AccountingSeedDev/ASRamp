@@ -1,5 +1,5 @@
 /**
- * @description Drives Pipeline 2 — one Queueable handles one page of sync-ready
+ * @description Drives the bill sync — one Queueable handles one page of sync-ready
  * bills and, if there's a next-page cursor, enqueues itself again. Mirrors
  * RampTransactionSyncQueueable.
  *

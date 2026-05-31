@@ -417,7 +417,7 @@ public with sharing class RampConfigurationController {
     }
 
     /**
-     * @description Enqueues Pipeline 1 — starts a chained Queueable that
+     * @description Enqueues the card-transaction sync — starts a chained Queueable that
      * fetches one page of SYNC_READY transactions, builds Journal Entries,
      * and POSTs the sync acknowledgment back to Ramp.
      * @return String The Apex Job Id and a short status message
@@ -435,7 +435,7 @@ public with sharing class RampConfigurationController {
     }
 
     /**
-     * @description Kicks off Pipeline 2 — bills → Account Payables (+ payments).
+     * @description Kicks off the bill sync — bills → Account Payables (+ payments).
      */
     @AuraEnabled
     public static String syncBills() {
@@ -449,7 +449,7 @@ public with sharing class RampConfigurationController {
     }
 
     /**
-     * @description Kicks off Pipeline 3 — reimbursements → employee Payables (+ payments).
+     * @description Kicks off the reimbursement sync — reimbursements → employee Payables (+ payments).
      */
     @AuraEnabled
     public static String syncReimbursements() {

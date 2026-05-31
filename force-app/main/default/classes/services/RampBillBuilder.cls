@@ -1,6 +1,6 @@
 /**
  * @description Pure transformation from Ramp bills to Accounting Seed Payables.
- * Phase 2a: one bill → one Account_Payable__c header + one Account_Payable_Line__c
+ * Bill → one Account_Payable__c header + one Account_Payable_Line__c
  * per bill line (debit/expense side only; AS posts the AP control credit).
  *
  * GL/variable coding reuses Ramp's accounting_field_selections mechanism (same as
@@ -34,7 +34,7 @@ public with sharing class RampBillBuilder {
         public String entity_id;
         public String status;        // OPEN | PAID
         public String sync_status;   // NOT_SYNCED | BILL_SYNCED | BILL_AND_PAYMENT_SYNCED
-        public BillPayment payment;  // nested; used in Phase 2b
+        public BillPayment payment;  // nested; used by the payment stage
     }
 
     public class BillVendor {
@@ -98,7 +98,7 @@ public with sharing class RampBillBuilder {
         public String billId;
         public AcctSeed__Account_Payable__c header;
         public List<AcctSeed__Account_Payable_Line__c> lines = new List<AcctSeed__Account_Payable_Line__c>();
-        // Phase 2b — populated only when the bill is PAID and a bill-payment bank GL is configured.
+        // Payment stage — populated only when the bill is PAID and a bill-payment bank GL is configured.
         public Boolean isPaid = false;
         public AcctSeed__Cash_Disbursement__c cashDisbursement;   // batch + payable links set by the service
         public AcctSeed__AP_Disbursement__c apDisbursement;       // payable + CD links set by the service
@@ -196,7 +196,7 @@ public with sharing class RampBillBuilder {
             pb.lines.add(buildLine(b, b.accounting_field_selections, amt, b.memo, 0, glByUuid, varByUuid, suspenseGLId));
         }
 
-        // ---- Phase 2b: paid bill → Cash Disbursement + AP Disbursement ----
+        // ---- Payment stage: paid bill → Cash Disbursement + AP Disbursement ----
         pb.isPaid = (b.status == 'PAID');
         if (pb.isPaid && bankGLId != null) {
             Decimal payAmt = (b.payment != null && b.payment.amount != null) ? b.payment.amount.toDecimal()

@@ -1,5 +1,5 @@
 /**
- * @description Pipeline 3 — fetch one page of SYNC_READY Ramp reimbursements and
+ * @description Fetch one page of SYNC_READY Ramp reimbursements and
  * post them into Accounting Seed as employee Payables (+ Cash Disbursement / AP
  * Disbursement when already reimbursed). Single-phase sync (REIMBURSEMENT_SYNC),
  * like card transactions. Idempotent via AcctSeed__ExtId__c keys:

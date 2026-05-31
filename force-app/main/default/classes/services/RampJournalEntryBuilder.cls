@@ -3,7 +3,7 @@
  * Journal Entry headers and lines. Resolves Ramp UUIDs to AS record Ids in
  * bulk; returns a BuildResult the caller can DML.
  *
- * Accounting model (Pipeline 1), per transaction:
+ * Accounting model, per card transaction:
  *   Dr  Expense GL          $X   (one line per transaction.line_items, or one if no splits)
  *   Cr  Ramp Card Clearing       $X   (one clearing line, GL from the ledger's Ramp defaults)
  *

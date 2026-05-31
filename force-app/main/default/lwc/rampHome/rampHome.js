@@ -1,4 +1,5 @@
 import { LightningElement, wire, track } from 'lwc';
+import { NavigationMixin } from 'lightning/navigation';
 import { refreshApex } from '@salesforce/apex';
 import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 import getHomeData from '@salesforce/apex/RampHomeController.getHomeData';
@@ -8,6 +9,8 @@ import syncBills from '@salesforce/apex/RampConfigurationController.syncBills';
 import syncReimbursements from '@salesforce/apex/RampConfigurationController.syncReimbursements';
 import schedulePipeline from '@salesforce/apex/RampHomeController.schedulePipeline';
 import unschedulePipeline from '@salesforce/apex/RampHomeController.unschedulePipeline';
+import getPipelineAvailability from '@salesforce/apex/RampHomeController.getPipelineAvailability';
+import getConnectionStatus from '@salesforce/apex/RampHomeController.getConnectionStatus';
 
 const FREQ_OPTIONS = [
     { label: 'Hourly', value: 'HOURLY' },
@@ -24,6 +27,7 @@ const ICONS = {
 };
 const STATUS = {
     active: { label: 'Active', cls: 'pill pill-good' },
+    good: { label: 'Success', cls: 'pill pill-good' },
     warning: { label: 'Attention', cls: 'pill pill-warn' },
     errors: { label: 'Errors', cls: 'pill pill-bad' },
     pending: { label: 'Pending', cls: 'pill pill-warn' },
@@ -39,7 +43,7 @@ const STEP_TAB = {
     firstrun: 'glaccounts'
 };
 
-export default class RampHome extends LightningElement {
+export default class RampHome extends NavigationMixin(LightningElement) {
     @track home;
     @track busy = {};
     @track lowerTab = 'errors';
@@ -49,8 +53,15 @@ export default class RampHome extends LightningElement {
     @track schedFreq = 'HOURLY';
     @track schedHour = '1';
     @track schedBusy = false;
+    @track availability = {};   // pipelineId → "available to sync in Ramp" (live callout, e.g. "12" / "100+")
+    @track conn = null;         // live connection status (real Ramp API call); null until first load
     wiredResult;
     error;
+
+    connectedCallback() {
+        this.loadAvailability();
+        this.loadConnection();
+    }
 
     @wire(getHomeData)
     wiredHome(result) {
@@ -63,15 +74,44 @@ export default class RampHome extends LightningElement {
         }
     }
 
+    // Live count of what's waiting in Ramp per inbound pipeline (non-cacheable callout).
+    loadAvailability() {
+        getPipelineAvailability()
+            .then((r) => { this.availability = r || {}; })
+            .catch(() => { /* leave as-is; cards fall back to local counts */ });
+    }
+
+    // Live connection check — authenticates and hits the Ramp API (non-cacheable callout).
+    loadConnection() {
+        getConnectionStatus()
+            .then((r) => { this.conn = r; })
+            .catch(() => { /* leave as-is; pill falls back to config-based state */ });
+    }
+
     // ── derived view-model ──
     get ready() { return !!this.home; }
-    get connected() { return this.home && this.home.connected; }
+    // Once the live check returns, it is authoritative; until then fall back to
+    // the config-presence flag from the cacheable getHomeData (avoids a flicker).
+    get connected() { return this.conn ? this.conn.connected : !!(this.home && this.home.connected); }
     get setupComplete() { return this.home && this.home.setupComplete; }
     get showSetupBanner() { return this.home && !this.home.setupComplete; }
-    get business() { return this.home ? this.home.business : ''; }
+    get business() {
+        if (this.conn && this.conn.business) return this.conn.business;
+        return this.home ? this.home.business : '';
+    }
     get donePct() { return this.home ? this.home.donePct : 0; }
-    get connClass() { return this.connected ? 'conn-dot conn-ok' : 'conn-dot conn-warn'; }
-    get connLabel() { return this.connected ? 'Connected' : 'Setup in progress'; }
+    // A live check that ran and failed shows a red error dot; an unconfigured /
+    // pre-check state shows the amber "setup" dot.
+    get connError() { return !!this.conn && !this.conn.connected && !!(this.home && this.home.connected); }
+    get connClass() {
+        if (this.connected) return 'conn-dot conn-ok';
+        return this.connError ? 'conn-dot conn-bad' : 'conn-dot conn-warn';
+    }
+    get connLabel() {
+        if (this.connected) return 'Connected';
+        return this.connError ? 'Connection error' : 'Setup in progress';
+    }
+    get connTitle() { return this.conn ? this.conn.detail : 'Checking connection to Ramp…'; }
     get anyBusy() { return Object.values(this.busy).some(Boolean); }
     get syncAllLabel() { return this.anyBusy ? 'Syncing…' : 'Sync all now'; }
     get syncAllDisabled() { return !this.setupComplete || this.anyBusy; }
@@ -149,8 +189,19 @@ export default class RampHome extends LightningElement {
                 succeededN: this._n(j.succeeded),
                 failedN: this._n(j.failed),
                 failedCls: j.failed ? 'jm-num bad' : 'jm-num muted',
-                lastRunLabel: j.lastRun ? new Date(j.lastRun).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '—'
+                lastRunLabel: j.lastRun ? new Date(j.lastRun).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '—',
+                hasRecord: !!j.recordId
             };
+        });
+    }
+
+    // Open the underlying Automated Job Result record for a sync-run card.
+    viewJobResult(e) {
+        const recordId = e.currentTarget.dataset.id;
+        if (!recordId) return;
+        this[NavigationMixin.Navigate]({
+            type: 'standard__recordPage',
+            attributes: { recordId, objectApiName: 'AcctSeed__Automated_Job_Results__c', actionName: 'view' }
         });
     }
     _glSyncedLabel() {
@@ -163,6 +214,13 @@ export default class RampHome extends LightningElement {
         return this.home.pipelines.map((p) => {
             const st = STATUS[p.statusKind] || STATUS.notset;
             const busy = !!this.busy[p.id];
+            // Inbound pipelines: "Pending" = live count of what's waiting in Ramp
+            // (SYNC_READY), from getPipelineAvailability. Master (outbound) falls
+            // back to its local not-yet-pushed count.
+            const avail = this.availability ? this.availability[p.id] : undefined;
+            const hasAvail = avail !== undefined && avail !== null;
+            const pendingN = hasAvail ? avail : this._n(p.pending);
+            const pendingWarn = hasAvail ? (avail !== '0' && avail !== '—') : p.pending > 0;
             return {
                 ...p,
                 iconName: ICONS[p.icon] || 'utility:apex',
@@ -172,7 +230,7 @@ export default class RampHome extends LightningElement {
                 statusCls: busy ? 'pill pill-warn' : st.cls,
                 counts: [
                     { key: 's', n: this._n(p.synced), label: 'Synced', cls: 'cn good' },
-                    { key: 'p', n: this._n(p.pending), label: 'Pending', cls: p.pending ? 'cn warn' : 'cn muted' },
+                    { key: 'p', n: pendingN, label: 'Pending', cls: pendingWarn ? 'cn warn' : 'cn muted' },
                     { key: 'f', n: this._n(p.failed), label: 'Failed', cls: p.failed ? 'cn bad' : 'cn muted' }
                 ],
                 showSync: p.implemented && !!p.action,
@@ -206,25 +264,11 @@ export default class RampHome extends LightningElement {
 
     get failures() { return this.home ? this.home.failures : []; }
     get hasFailures() { return this.failures.length > 0; }
-    get settings() { return this.home ? this.home.settings : []; }
 
     get tabErrorsCls() { return this._tabCls('errors'); }
-    get tabSettingsCls() { return this._tabCls('settings'); }
-    get tabScheduleCls() { return this._tabCls('schedule'); }
     get showErrors() { return this.lowerTab === 'errors'; }
-    get showSettings() { return this.lowerTab === 'settings'; }
-    get showSchedule() { return this.lowerTab === 'schedule'; }
     get errorTabLabel() { return this.hasFailures ? `Error queue · ${this.failures.length}` : 'Error queue'; }
     _tabCls(id) { return this.lowerTab === id ? 'ltab ltab-on' : 'ltab'; }
-
-    get schedules() {
-        return [
-            { key: 'm', name: 'Master data sync', cadence: 'Every 4 hours · weekdays', note: 'Manual today' },
-            { key: 't', name: 'Card transactions', cadence: 'Every 4 hours · weekdays', note: 'Manual today' },
-            { key: 'b', name: 'Bills', cadence: 'Every 2 hours (recommended)', note: 'Manual today' },
-            { key: 'r', name: 'Reimbursements', cadence: 'Every 4 hours (recommended)', note: 'Manual today' }
-        ];
-    }
 
     // ── actions ──
     selectTab(e) { this.lowerTab = e.currentTarget.dataset.id; }
@@ -257,7 +301,7 @@ export default class RampHome extends LightningElement {
         this._run('bill', 'syncBill');
         this._run('reimb', 'syncReimb');
     }
-    handleRefresh() { refreshApex(this.wiredResult); }
+    handleRefresh() { refreshApex(this.wiredResult); this.loadAvailability(); this.loadConnection(); }
 
     // ── scheduler actions ──
     openSchedule(e) {
@@ -307,6 +351,8 @@ export default class RampHome extends LightningElement {
                 this.busy = { ...this.busy, [id]: false };
                 // Queueables run async; give the user fresh counts on next tick.
                 refreshApex(this.wiredResult);
+                this.loadAvailability();
+                this.loadConnection();
             });
     }
 

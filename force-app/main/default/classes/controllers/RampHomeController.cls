@@ -22,7 +22,6 @@ public with sharing class RampHomeController {
         @AuraEnabled public String direction;
         @AuraEnabled public String fromLabel;
         @AuraEnabled public String toLabel;
-        @AuraEnabled public String phase;
         @AuraEnabled public String icon;
         @AuraEnabled public Boolean implemented = false;
         @AuraEnabled public String statusKind;
@@ -65,6 +64,13 @@ public with sharing class RampHomeController {
         @AuraEnabled public String error;
     }
 
+    /** Live connection status from getConnectionStatus (real Ramp API call). */
+    public class ConnStatus {
+        @AuraEnabled public Boolean connected = false;
+        @AuraEnabled public String business;   // real workspace name when available
+        @AuraEnabled public String detail;     // human-readable status for tooltip
+    }
+
     /** Run-level metrics sourced from Automated Job Results. */
     public class JobMetric {
         @AuraEnabled public String jobType;
@@ -75,6 +81,7 @@ public with sharing class RampHomeController {
         @AuraEnabled public Datetime lastRun;
         @AuraEnabled public String statusKind;  // good | errors | notset
         @AuraEnabled public Boolean hasRun = false;
+        @AuraEnabled public Id recordId;         // latest Automated Job Result record (drill-in)
     }
 
     public class HomeData {
@@ -257,6 +264,102 @@ public with sharing class RampHomeController {
 
     public class RampHomeException extends Exception {}
 
+    // ───────────────────────── live "available to sync" (Ramp callout) ─────────────────────────
+    /**
+     * @description Per inbound pipeline, how many records are waiting in Ramp to
+     * be synced (SYNC_READY). Live callouts, so this is NOT cacheable and is
+     * fetched imperatively by the LWC (the @wire'd getHomeData can't do callouts).
+     * Counts the first page only and returns "100+" when more pages exist — a fast
+     * dashboard signal, not an exact total. Returns "—" when the call can't be made
+     * (no connection / missing scope) so the dashboard degrades gracefully.
+     */
+    @AuraEnabled
+    public static Map<String, String> getPipelineAvailability() {
+        Map<String, String> out = new Map<String, String>();
+        out.put('txn', countAvailable('/developer/v1/transactions?sync_status=SYNC_READY&page_size=100'));
+        out.put('bill', countAvailable('/developer/v1/bills?sync_ready=true&page_size=100'));
+        out.put('reimb', countAvailable('/developer/v1/reimbursements?sync_status=SYNC_READY&page_size=100'));
+        return out;
+    }
+
+    private static String countAvailable(String endpoint) {
+        try {
+            HttpResponse res = RampAPIService.get(endpoint);
+            if (res.getStatusCode() < 200 || res.getStatusCode() >= 300) return '—';
+            Map<String, Object> b = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            List<Object> data = (List<Object>) b.get('data');
+            Integer n = (data == null) ? 0 : data.size();
+            Map<String, Object> page = (Map<String, Object>) b.get('page');
+            Boolean hasMore = page != null && String.isNotBlank((String) page.get('next'));
+            return hasMore ? (n + '+') : String.valueOf(n);
+        } catch (Exception e) {
+            return '—';
+        }
+    }
+
+    /**
+     * @description Live connection check — fetched imperatively by the LWC (the
+     * @wire'd getHomeData can't do callouts). Authenticates against Ramp and
+     * makes a real API call (GET /developer/v1/business), which exercises the
+     * whole chain — active credential → client-credentials token → authorized
+     * call — and auto-refreshes on a 401. A 2xx means the integration is truly
+     * live, and the response carries the real workspace name for the sub-label.
+     * A 403 means the token is valid but the credential lacks business:read, so
+     * the connection is still live (we just keep the credential label as the
+     * name). Anything else (or a thrown auth/callout error) reports not connected.
+     */
+    @AuraEnabled
+    public static ConnStatus getConnectionStatus() {
+        ConnStatus s = new ConnStatus();
+
+        List<Ramp_Credential__mdt> creds = [
+            SELECT Label FROM Ramp_Credential__mdt WHERE Is_Active__c = true LIMIT 1
+        ];
+        s.business = creds.isEmpty() ? 'Your Ramp workspace' : creds[0].Label;
+        if (creds.isEmpty()) {
+            s.detail = 'No active Ramp credential is configured.';
+            return s;
+        }
+
+        try {
+            HttpResponse res = RampAPIService.get('/developer/v1/business');
+            Integer code = res.getStatusCode();
+            if (code >= 200 && code < 300) {
+                s.connected = true;
+                s.detail = 'Live connection verified with Ramp.';
+                Map<String, Object> b = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+                String name = firstNonBlank(new List<String>{
+                    (String) b.get('business_name_legal'),
+                    (String) b.get('business_name_on_card'),
+                    (String) b.get('legal_name')
+                });
+                if (String.isNotBlank(name)) {
+                    s.business = name;
+                }
+            } else if (code == 403) {
+                // Authenticated, but the credential lacks business:read — still live.
+                s.connected = true;
+                s.detail = 'Connected. Grant the business:read scope to show the workspace name.';
+            } else if (code == 401) {
+                s.detail = 'Authentication failed (401). Check the client ID and secret.';
+            } else {
+                s.detail = 'Ramp returned status ' + code + '.';
+            }
+        } catch (Exception e) {
+            s.detail = 'Could not reach Ramp: ' + e.getMessage();
+        }
+        return s;
+    }
+
+    private static String firstNonBlank(List<String> vals) {
+        for (String v : vals) {
+            if (String.isNotBlank(v)) {
+                return v;
+            }
+        }
+        return null;
+    }
+
     // ───────────────────────── stats helpers ─────────────────────────
     private static Integer nz(Integer i) { return i == null ? 0 : i; }
 
@@ -294,7 +397,7 @@ public with sharing class RampHomeController {
     private static Map<String, AcctSeed__Automated_Job_Results__c> latestJobResults() {
         Map<String, AcctSeed__Automated_Job_Results__c> latest = new Map<String, AcctSeed__Automated_Job_Results__c>();
         for (AcctSeed__Automated_Job_Results__c r : [
-            SELECT AcctSeed__Schedule_Job_Type__c, AcctSeed__Processed__c, AcctSeed__Succeeded__c, AcctSeed__Failed__c, CreatedDate
+            SELECT Id, AcctSeed__Schedule_Job_Type__c, AcctSeed__Processed__c, AcctSeed__Succeeded__c, AcctSeed__Failed__c, CreatedDate
             FROM AcctSeed__Automated_Job_Results__c
             WHERE AcctSeed__Schedule_Job_Type__c LIKE 'Ramp %'
             ORDER BY CreatedDate DESC
@@ -324,6 +427,7 @@ public with sharing class RampHomeController {
             return j;
         }
         j.hasRun = true;
+        j.recordId = r.Id;
         j.processed = (Integer) nzDec(r.AcctSeed__Processed__c);
         j.succeeded = (Integer) nzDec(r.AcctSeed__Succeeded__c);
         j.failed = (Integer) nzDec(r.AcctSeed__Failed__c);
@@ -364,7 +468,7 @@ public with sharing class RampHomeController {
         Pipeline master = new Pipeline();
         master.id = 'master'; master.name = 'Master data sync'; master.shortName = 'Master data';
         master.target = 'GL accounts · Variables · Vendors'; master.direction = 'out';
-        master.fromLabel = 'Accounting Seed'; master.toLabel = 'Ramp'; master.phase = 'Phase 1'; master.icon = 'database';
+        master.fromLabel = 'Accounting Seed'; master.toLabel = 'Ramp'; master.icon = 'database';
         master.implemented = true; master.synced = glSynced; master.pending = glPending; master.failed = 0;
         master.records = glTotal + ' GL accounts · ' + varCount + ' variables';
         master.statusKind = glTotal == 0 ? 'notset' : (glPending > 0 ? 'warning' : 'active');
@@ -372,17 +476,17 @@ public with sharing class RampHomeController {
         master.action = 'syncGL';
         pipes.add(master);
 
-        pipes.add(payablePipe('txn', 'Card transactions', 'Transactions', 'Journal Entries', 'in', 'Pipeline 1', 'card',
+        pipes.add(payablePipe('txn', 'Card transactions', 'Transactions', 'Journal Entries', 'in', 'card',
             tx, tx.get('synced') + ' journal entries', 'syncTxn',
             'Cleared card spend posts as balanced journal entries — expense debit, card clearing credit.',
             RampJobResultLogger.JOB_CARD_SYNC, ajr));
 
-        pipes.add(payablePipe('bill', 'Bills', 'Bills', 'Vendor Payables', 'in', 'Pipeline 2', 'file',
+        pipes.add(payablePipe('bill', 'Bills', 'Bills', 'Vendor Payables', 'in', 'file',
             bill, bill.get('total') + ' payables', 'syncBill',
             'Vendor bills post as Account Payables; paid bills add a Cash Disbursement that clears them.',
             RampJobResultLogger.JOB_BILL_SYNC, ajr));
 
-        pipes.add(payablePipe('reimb', 'Reimbursements', 'Reimbursements', 'Employee Payables', 'in', 'Pipeline 3', 'receipt',
+        pipes.add(payablePipe('reimb', 'Reimbursements', 'Reimbursements', 'Employee Payables', 'in', 'receipt',
             reimb, reimb.get('total') + ' reimbursements', 'syncReimb',
             'Employee out-of-pocket spend posts as employee Payables; reimbursed items add a Cash Disbursement.',
             RampJobResultLogger.JOB_REIMBURSEMENT_SYNC, ajr));
@@ -391,11 +495,11 @@ public with sharing class RampHomeController {
     }
 
     private static Pipeline payablePipe(String id, String name, String shortName, String target, String direction,
-            String phase, String icon, Map<String, Integer> stats, String records, String action, String blurb,
+            String icon, Map<String, Integer> stats, String records, String action, String blurb,
             String jobType, Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
         Pipeline p = new Pipeline();
         p.id = id; p.name = name; p.shortName = shortName; p.target = target; p.direction = direction;
-        p.fromLabel = 'Ramp'; p.toLabel = 'Accounting Seed'; p.phase = phase; p.icon = icon;
+        p.fromLabel = 'Ramp'; p.toLabel = 'Accounting Seed'; p.icon = icon;
         p.implemented = true;
         p.synced = nz(stats.get('synced')); p.pending = nz(stats.get('pending')); p.failed = nz(stats.get('failed'));
         p.records = records; p.action = action; p.blurb = blurb;

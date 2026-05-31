@@ -122,7 +122,7 @@ public with sharing class RampSyncSettingsService {
     /**
      * @description The bank/cash GL credited when a paid Ramp bill posts a Cash
      * Disbursement. Resolved from the "Ramp Bill Payment Bank" default GL Account
-     * on the sync ledger. Required for Phase 2b — throws if unset.
+     * on the sync ledger. Required for the bill-payment stage — throws if unset.
      */
     /** Non-throwing variant — null when the bank GL default isn't configured. */
     public static Id getBillPaymentBankGLIdOrNull() {

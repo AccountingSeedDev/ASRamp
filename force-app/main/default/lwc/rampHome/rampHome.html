@@ -15,7 +15,7 @@
                 <span class="brand-sfx">Integration</span>
             </div>
             <div class="spacer"></div>
-            <div class="conn">
+            <div class="conn" title={connTitle}>
                 <span class={connClass}></span>
                 <div class="conn-text">
                     <div class="conn-title">{connLabel}</div>
@@ -96,7 +96,6 @@
                 <lightning-icon icon-name="utility:flow" size="x-small"></lightning-icon>
                 <span>Sync pipelines</span>
                 <div class="spacer"></div>
-                <span class="sec-hint">4 pipelines · 2 directions</span>
             </div>
             <div class="pgrid">
                 <template for:each={pipelines} for:item="p">
@@ -108,7 +107,6 @@
                             <div class="pcard-head">
                                 <div class="pcard-name-row">
                                     <span class="pcard-name">{p.name}</span>
-                                    <span class="phase">{p.phase}</span>
                                 </div>
                                 <div class="pcard-flow">{p.fromLabel} &#8594; {p.toLabel} · <span class="pcard-target">{p.target}</span></div>
                             </div>
@@ -210,7 +208,16 @@
                             <div class="jm"><div class="jm-num good">{j.succeededN}</div><div class="jm-label">Succeeded</div></div>
                             <div class="jm"><div class={j.failedCls}>{j.failedN}</div><div class="jm-label">Failed</div></div>
                         </div>
-                        <div class="jcard-foot">Last run: {j.lastRunLabel}</div>
+                        <div class="jcard-foot">
+                            <span>Last run: {j.lastRunLabel}</span>
+                            <template lwc:if={j.hasRecord}>
+                                <div class="spacer"></div>
+                                <button class="link-btn" data-id={j.recordId} onclick={viewJobResult}>
+                                    View details
+                                    <lightning-icon icon-name="utility:forward" size="xx-small"></lightning-icon>
+                                </button>
+                            </template>
+                        </div>
                     </div>
                 </template>
             </div>
@@ -219,8 +226,6 @@
             <div class="lower">
                 <div class="ltabs">
                     <button class={tabErrorsCls} data-id="errors" onclick={selectTab}>{errorTabLabel}</button>
-                    <button class={tabSettingsCls} data-id="settings" onclick={selectTab}>Settings</button>
-                    <button class={tabScheduleCls} data-id="schedule" onclick={selectTab}>Sync schedule</button>
                 </div>
                 <div class="lower-body">
                     <!-- error queue -->
@@ -259,35 +264,6 @@
                                 <div class="empty-sub">Every record posted cleanly and was acknowledged by Ramp.</div>
                             </div>
                         </template>
-                    </template>
-
-                    <!-- settings -->
-                    <template lwc:if={showSettings}>
-                        <div class="kv-list">
-                            <template for:each={settings} for:item="s">
-                                <div key={s.label} class="kv">
-                                    <span class="kv-k">{s.label}</span>
-                                    <span class="kv-v">{s.value}</span>
-                                </div>
-                            </template>
-                        </div>
-                        <div class="hint-note">Posting configuration lives in <span class="mono">Ramp_Sync_Settings__mdt</span> and the GL Account Specification metadata. <button class="link-btn" data-tab="glaccounts" onclick={openConfig}>Manage configuration</button></div>
-                    </template>
-
-                    <!-- schedule -->
-                    <template lwc:if={showSchedule}>
-                        <div class="kv-list">
-                            <template for:each={schedules} for:item="sc">
-                                <div key={sc.key} class="kv">
-                                    <span class="kv-k">{sc.name}</span>
-                                    <span class="sched-right">
-                                        <span class="sched-cad">{sc.cadence}</span>
-                                        <span class="sched-note">{sc.note}</span>
-                                    </span>
-                                </div>
-                            </template>
-                        </div>
-                        <div class="hint-note">Scheduled polling is configured with <span class="mono">System.schedule()</span>. Until enabled, runs are triggered manually with the Sync buttons above.</div>
                     </template>
                 </div>
             </div>

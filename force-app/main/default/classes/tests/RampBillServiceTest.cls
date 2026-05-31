@@ -1,6 +1,6 @@
 /**
  * @description Tests for RampBillService — fetch sync-ready bills, create Payables,
- * and acknowledge BILL_SYNC (Phase 2a).
+ * and acknowledge BILL_SYNC.
  */
 @IsTest
 private class RampBillServiceTest {

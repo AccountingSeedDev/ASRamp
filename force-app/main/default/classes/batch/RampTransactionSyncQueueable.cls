@@ -1,5 +1,5 @@
 /**
- * @description Drives Pipeline 1 — one Queueable instance handles one page of
+ * @description Drives the card-transaction sync — one Queueable instance handles one page of
  * SYNC_READY transactions and, if the response has a next-page cursor, enqueues
  * itself again with that cursor.
  *

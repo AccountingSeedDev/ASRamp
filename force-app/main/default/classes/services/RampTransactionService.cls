@@ -1,5 +1,5 @@
 /**
- * @description Orchestrates one page of Pipeline 1 work — fetch SYNC_READY Ramp
+ * @description Orchestrates one page of card-transaction work — fetch SYNC_READY Ramp
  * card transactions, transform into grouped Journal Entries via
  * RampJournalEntryBuilder, upsert headers + lines, and POST the result to
  * /developer/v1/accounting/syncs.

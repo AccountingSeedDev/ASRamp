@@ -314,7 +314,7 @@ private class RampConfigurationControllerTest {
     }
 
     // --------------------------------------------------------------------
-    //  Pipeline 1 — transaction sync
+    //  Transaction sync
     // --------------------------------------------------------------------
 
     private static void configureSettingsForSyncTests() {

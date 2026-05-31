@@ -1,5 +1,5 @@
 /**
- * @description Drives Pipeline 3 — one Queueable handles one page of SYNC_READY
+ * @description Drives the reimbursement sync — one Queueable handles one page of SYNC_READY
  * reimbursements and chains to the next page. Mirrors the card/bill queueables,
  * logging one cumulative AcctSeed__Automated_Job_Results__c per run.
  */

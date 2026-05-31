@@ -45,6 +45,7 @@
 .conn-dot { width: 8px; height: 8px; border-radius: 999px; }
 .conn-ok { background: var(--as-green); box-shadow: 0 0 0 3px var(--as-green-bg); }
 .conn-warn { background: var(--as-orange-600); box-shadow: 0 0 0 3px var(--as-amber-bg); }
+.conn-bad { background: var(--as-danger); box-shadow: 0 0 0 3px var(--as-red-bg); }
 .conn-title { font-size: 12px; font-weight: 600; color: var(--as-ink); line-height: 1.2; }
 .conn-sub { font-size: 11px; color: var(--as-muted); line-height: 1.2; }
 
@@ -126,7 +127,6 @@ button.step-chip:hover { background: rgba(255,255,255,.12); border-color: rgba(2
 .pcard-head { flex: 1; min-width: 0; }
 .pcard-name-row { display: flex; align-items: center; gap: 8px; }
 .pcard-name { font-size: 15px; font-weight: 600; color: var(--as-primary); }
-.phase { font-size: 10px; font-weight: 600; color: var(--as-muted); background: var(--as-surface2); padding: 1px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: .04em; }
 .pcard-flow { font-size: 11.5px; color: var(--as-muted); margin-top: 3px; }
 .pcard-target { color: var(--as-blue-fg); font-weight: 600; }
 
@@ -200,7 +200,8 @@ button.step-chip:hover { background: rgba(255,255,255,.12); border-color: rgba(2
 .jm-num.bad { color: var(--as-red-fg); }
 .jm-num.muted { color: var(--as-muted); }
 .jm-label { font-size: 11px; color: var(--as-muted); }
-.jcard-foot { font-size: 12px; color: var(--as-muted); border-top: 1px solid var(--as-line); padding-top: 8px; }
+.jcard-foot { font-size: 12px; color: var(--as-muted); border-top: 1px solid var(--as-line); padding-top: 8px; display: flex; align-items: center; gap: 8px; }
+.jcard-foot .link-btn { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; }
 
 /* per-pipeline last run line */
 .pcard-lastrun { font-size: 12px; color: var(--as-muted); }
