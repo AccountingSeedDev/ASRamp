@@ -4,19 +4,28 @@
 @IsTest
 private class RampConfigurationControllerTest {
 
+    // No credential is packaged; inject a synthetic one for the callout path.
+    static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
+
     @IsTest
     static void testGetActiveCredential_WithCredential() {
-        // Since we have a Default credential in the org, test that it's returned
+        // The config screen reads the raw CMDT record directly (not via the
+        // RampAuthService seam). Credentials are deployed per-environment, so a
+        // clean org has none — assert against whichever state this org is in.
+        Boolean hasCredential = ![
+            SELECT Id FROM Ramp_Credential__mdt WHERE Is_Active__c = true LIMIT 1
+        ].isEmpty();
+
         Test.startTest();
         RampConfigurationController.CredentialWrapper result =
             RampConfigurationController.getActiveCredential();
         Test.stopTest();
 
-        // If a credential exists, it should be returned
-        // This test validates that getActiveCredential works correctly
-        System.assertNotEquals(null, result, 'Should return credential if one exists');
-        if (result != null) {
+        if (hasCredential) {
+            System.assertNotEquals(null, result, 'Should return the active credential');
             System.assertNotEquals(null, result.developerName, 'Developer name should not be null');
+        } else {
+            System.assertEquals(null, result, 'Returns null when no active credential exists');
         }
     }
 
@@ -58,16 +67,16 @@ private class RampConfigurationControllerTest {
 
     @IsTest
     static void testSaveCredential_Success() {
-        RampConfigurationController.CredentialWrapper credential =
-            new RampConfigurationController.CredentialWrapper();
-        credential.developerName = 'Test';
-        credential.label = 'Test Credential';
-        credential.clientId = 'test_client_id';
-        credential.clientSecret = 'test_secret';
-        credential.tokenUrl = 'https://api.ramp.com/oauth/token';
-        credential.apiBaseUrl = 'https://api.ramp.com';
-        credential.scopes = 'transactions:read';
-        credential.isActive = true;
+        Map<String, Object> credential = new Map<String, Object>{
+            'developerName' => 'Test',
+            'label' => 'Test Credential',
+            'clientId' => 'test_client_id',
+            'clientSecret' => 'test_secret',
+            'tokenUrl' => 'https://api.ramp.com/oauth/token',
+            'apiBaseUrl' => 'https://api.ramp.com',
+            'scopes' => 'transactions:read',
+            'isActive' => true
+        };
 
         Test.startTest();
         String result = RampConfigurationController.saveCredential(credential);
@@ -79,10 +88,10 @@ private class RampConfigurationControllerTest {
 
     @IsTest
     static void testSaveCredential_MissingClientId() {
-        RampConfigurationController.CredentialWrapper credential =
-            new RampConfigurationController.CredentialWrapper();
-        credential.developerName = 'Test';
-        credential.clientSecret = 'test_secret';
+        Map<String, Object> credential = new Map<String, Object>{
+            'developerName' => 'Test',
+            'clientSecret' => 'test_secret'
+        };
 
         Test.startTest();
         Boolean exceptionThrown = false;
@@ -100,10 +109,10 @@ private class RampConfigurationControllerTest {
 
     @IsTest
     static void testSaveCredential_MissingClientSecret() {
-        RampConfigurationController.CredentialWrapper credential =
-            new RampConfigurationController.CredentialWrapper();
-        credential.developerName = 'Test';
-        credential.clientId = 'test_client_id';
+        Map<String, Object> credential = new Map<String, Object>{
+            'developerName' => 'Test',
+            'clientId' => 'test_client_id'
+        };
 
         Test.startTest();
         Boolean exceptionThrown = false;
@@ -121,10 +130,10 @@ private class RampConfigurationControllerTest {
 
     @IsTest
     static void testSaveCredential_MissingDeveloperName() {
-        RampConfigurationController.CredentialWrapper credential =
-            new RampConfigurationController.CredentialWrapper();
-        credential.clientId = 'test_client_id';
-        credential.clientSecret = 'test_secret';
+        Map<String, Object> credential = new Map<String, Object>{
+            'clientId' => 'test_client_id',
+            'clientSecret' => 'test_secret'
+        };
 
         Test.startTest();
         Boolean exceptionThrown = false;

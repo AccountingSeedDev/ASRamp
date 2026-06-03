@@ -20,7 +20,7 @@
     <label>Ramp Admin</label>
     <license>Salesforce</license>
     <tabSettings>
-        <tab>Ramp_Configuration</tab>
+        <tab>Ramp_Home</tab>
         <visibility>Visible</visibility>
     </tabSettings>
 </PermissionSet>

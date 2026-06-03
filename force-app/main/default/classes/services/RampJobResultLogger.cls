@@ -14,6 +14,9 @@ public with sharing class RampJobResultLogger {
     public static final String JOB_CARD_SYNC = 'Ramp Card Transaction Sync';
     public static final String JOB_BILL_SYNC = 'Ramp Bill Sync';
     public static final String JOB_REIMBURSEMENT_SYNC = 'Ramp Reimbursement Sync';
+    public static final String JOB_FIELD_OPTIONS_SYNC = 'Ramp Accounting Variable Sync';
+    public static final String JOB_GL_SYNC = 'Ramp GL Account Sync';
+    public static final String JOB_VENDOR_SYNC = 'Ramp Vendor Sync';
 
     private static final Integer NOTES_MAX = 30000;
 

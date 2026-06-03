@@ -4,6 +4,9 @@
 @IsTest
 private class RampAPIServiceTest {
 
+    // No credential is packaged; inject a synthetic one for the callout path.
+    static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
+
     @IsTest
     static void testGet_Success() {
         Test.setMock(HttpCalloutMock.class, new RampAPIMockSuccess());

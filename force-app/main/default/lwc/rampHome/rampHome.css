@@ -153,6 +153,14 @@ button.step-chip:hover { background: rgba(255,255,255,.12); border-color: rgba(2
 
 /* lower zone */
 .lower { background: #fff; border: 1px solid var(--as-line); border-radius: 10px; box-shadow: 0 1px 2px rgba(11,30,60,.06); overflow: hidden; }
+.ptabs { display: flex; gap: 4px; margin: 0; padding: 0 6px; position: relative; z-index: 1; }
+.ptab { display: inline-flex; align-items: center; gap: 7px; background: var(--as-surface2); border: 1px solid var(--as-line); border-bottom: none; cursor: pointer; padding: 11px 20px; font-family: var(--font); font-size: 13px; font-weight: 600; color: var(--as-muted); border-radius: 9px 9px 0 0; position: relative; top: 1px; }
+.ptab:hover { color: var(--as-primary-500); }
+.ptab-on { background: var(--as-surface); color: var(--as-primary-500); border-top: 2px solid var(--as-primary-500); padding-top: 10px; }
+.ptab lightning-icon { --sds-c-icon-color-foreground-default: currentColor; }
+.ptab-panel { border: 1px solid var(--as-line); border-radius: 0 12px 12px 12px; background: var(--as-surface); padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+.ptab-panel .lower-body { padding: 0; }
+.body-loading { display: flex; align-items: center; justify-content: center; position: relative; min-height: 280px; }
 .ltabs { display: flex; border-bottom: 1px solid var(--as-line); padding: 0 8px; gap: 2px; }
 .ltab { background: none; border: none; cursor: pointer; padding: 13px 14px; font-family: var(--font); font-size: 13px; font-weight: 600; color: var(--as-muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .ltab-on { color: var(--as-primary-500); border-bottom-color: var(--as-primary-500); }

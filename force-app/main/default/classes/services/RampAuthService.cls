@@ -6,14 +6,39 @@ public with sharing class RampAuthService {
     private static final String CACHE_PARTITION = 'AcctSeedRamp.RampTokens';
     private static final Integer CACHE_TTL_SECONDS = 172800; // 48 hours (max allowed)
 
+    // ── Test seam ──
+    // The credential record carries the live client id/secret and is deployed
+    // per-environment, NOT packaged — so a clean org (e.g. the package build org)
+    // has no active credential. Callout tests inject one via overrideCredential.
+    // Production never sets this, so getActiveCredential keeps its normal query.
+    @TestVisible
+    private static Ramp_Credential__mdt overrideCredential;
+
+    @TestVisible
+    private static Ramp_Credential__mdt buildTestCredential() {
+        return new Ramp_Credential__mdt(
+            DeveloperName = 'RampTestDefault',
+            Label = 'Ramp (Test)',
+            Client_ID__c = 'test_client_id',
+            Client_Secret__c = 'test_client_secret',
+            Token_URL__c = 'https://demo-api.ramp.com/developer/v1/token',
+            API_Base_URL__c = 'https://demo-api.ramp.com',
+            Scopes__c = 'transactions:read bills:read reimbursements:read accounting:read accounting:write',
+            Is_Active__c = true
+        );
+    }
+
     /**
      * @description Retrieves the active Ramp credential configuration
      * @return Ramp_Credential__mdt The active credential record
      * @throws RampAuthException if no active credential is found
      */
     public static Ramp_Credential__mdt getActiveCredential() {
+        if (overrideCredential != null) {
+            return overrideCredential;
+        }
         List<Ramp_Credential__mdt> credentials = [
-            SELECT Client_ID__c, Client_Secret__c, Token_URL__c,
+            SELECT Label, Client_ID__c, Client_Secret__c, Token_URL__c,
                    API_Base_URL__c, Scopes__c, Is_Active__c, DeveloperName
             FROM Ramp_Credential__mdt
             WHERE Is_Active__c = true

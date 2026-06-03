@@ -64,32 +64,68 @@ public with sharing class RampSyncSettingsService {
         return cachedSettings;
     }
 
+    /**
+     * @description Resolves the configured default ledger to its record Id.
+     * Default_Ledger__c holds the ledger's unique AcctSeed__ExtId__c (preferred —
+     * it's unique and survives renames). For back-compat / first run the value may
+     * still be a ledger Name: we match by Name and then self-heal by stamping the
+     * Name into the ledger's (blank) ExtId, so every later lookup uses the unique
+     * key. Names are not unique, so the Name path can still hit a duplicate and is
+     * reported as such. The cache makes the stamp happen at most once per run.
+     */
     public static Id getDefaultLedgerId() {
         if (cachedLedgerId != null) {
             return cachedLedgerId;
         }
 
-        String ledgerName = getSettings().Default_Ledger__c;
-        if (String.isBlank(ledgerName)) {
+        String key = getSettings().Default_Ledger__c;
+        if (String.isBlank(key)) {
             throw new RampSyncSettingsException(
                 'Default_Ledger__c is not configured on Ramp_Sync_Settings__mdt.Default.'
             );
         }
 
-        List<AcctSeed__Ledger__c> matches = [
-            SELECT Id FROM AcctSeed__Ledger__c WHERE Name = :ledgerName LIMIT 2
+        // Primary: resolve by the unique external id.
+        List<AcctSeed__Ledger__c> byExt = [
+            SELECT Id FROM AcctSeed__Ledger__c WHERE AcctSeed__ExtId__c = :key LIMIT 2
         ];
-
-        if (matches.isEmpty()) {
-            throw new RampSyncSettingsException('No Ledger named "' + ledgerName + '" was found.');
+        if (byExt.size() == 1) {
+            cachedLedgerId = byExt[0].Id;
+            return cachedLedgerId;
         }
-        if (matches.size() > 1) {
+        if (byExt.size() > 1) {
+            // AcctSeed__ExtId__c is unique, so this should be unreachable — guard anyway.
+            throw new RampSyncSettingsException('Multiple Ledgers share External Id "' + key + '".');
+        }
+
+        // Fallback: match by Name, then stamp the External Id from the Name so future
+        // lookups use the unique key. (Only reached when no ledger has ExtId = key, so
+        // stamping Name -> ExtId cannot collide with the unique constraint.)
+        List<AcctSeed__Ledger__c> byName = [
+            SELECT Id, Name, AcctSeed__ExtId__c FROM AcctSeed__Ledger__c WHERE Name = :key LIMIT 2
+        ];
+        if (byName.isEmpty()) {
+            throw new RampSyncSettingsException('No Ledger with External Id or Name "' + key + '" was found.');
+        }
+        if (byName.size() > 1) {
             throw new RampSyncSettingsException(
-                'Multiple Ledgers share the name "' + ledgerName + '". Pick a unique value.'
+                'Multiple Ledgers are named "' + key + '". Set a unique AcctSeed__ExtId__c on the ' +
+                'intended Ledger and use that value in Ramp_Sync_Settings__mdt.Default.Default_Ledger__c.'
             );
         }
 
-        cachedLedgerId = matches[0].Id;
+        AcctSeed__Ledger__c ledger = byName[0];
+        if (String.isBlank(ledger.AcctSeed__ExtId__c)) {
+            // Best-effort self-heal — a stamp failure (e.g. FLS) must not block the sync.
+            try {
+                ledger.AcctSeed__ExtId__c = ledger.Name;
+                update ledger;
+            } catch (Exception e) {
+                System.debug(LoggingLevel.WARN, 'Could not stamp Ledger ExtId: ' + e.getMessage());
+            }
+        }
+
+        cachedLedgerId = ledger.Id;
         return cachedLedgerId;
     }
 

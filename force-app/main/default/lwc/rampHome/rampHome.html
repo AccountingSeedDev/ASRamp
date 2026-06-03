@@ -37,6 +37,7 @@
         </header>
 
         <div class="body">
+            <template lwc:if={ready}>
             <!-- ───────── setup banner / health strip ───────── -->
             <template lwc:if={showSetupBanner}>
                 <div class="setup">
@@ -75,7 +76,7 @@
                     <div class="strip-detail">{healthDetail}</div>
                     <div class="spacer"></div>
                     <template lwc:if={hasFailures}>
-                        <button class="btn btn-danger sm" data-id="errors" onclick={selectTab}>Review errors</button>
+                        <button class="btn btn-danger sm" onclick={reviewErrors}>Review errors</button>
                     </template>
                 </div>
             </template>
@@ -91,14 +92,25 @@
                 </template>
             </div>
 
-            <!-- ───────── pipelines ───────── -->
+            <!-- ───────── sync pipelines (tabbed: Transaction / Master data) ───────── -->
             <div class="sec-label">
                 <lightning-icon icon-name="utility:flow" size="x-small"></lightning-icon>
                 <span>Sync pipelines</span>
                 <div class="spacer"></div>
             </div>
+            <div class="ptabs">
+                <button class={txnTabCls} data-id="transaction" onclick={selectPipeTab}>
+                    <lightning-icon icon-name="utility:money" size="xx-small"></lightning-icon>
+                    <span>Transaction</span>
+                </button>
+                <button class={masterTabCls} data-id="master" onclick={selectPipeTab}>
+                    <lightning-icon icon-name="utility:database" size="xx-small"></lightning-icon>
+                    <span>Master data</span>
+                </button>
+            </div>
+            <div class="ptab-panel">
             <div class="pgrid">
-                <template for:each={pipelines} for:item="p">
+                <template for:each={activePipelines} for:item="p">
                     <div key={p.id} class={p.cardCls}>
                         <div class="pcard-top">
                             <div class={p.tintCls}>
@@ -197,7 +209,7 @@
                 <span class="sec-hint">from Automated Job Results</span>
             </div>
             <div class="jgrid">
-                <template for:each={jobs} for:item="j">
+                <template for:each={activeJobs} for:item="j">
                     <div key={j.jobType} class="jcard">
                         <div class="jcard-top">
                             <span class="jcard-name">{j.label}</span>
@@ -222,51 +234,56 @@
                 </template>
             </div>
 
-            <!-- ───────── lower zone ───────── -->
-            <div class="lower">
-                <div class="ltabs">
-                    <button class={tabErrorsCls} data-id="errors" onclick={selectTab}>{errorTabLabel}</button>
-                </div>
-                <div class="lower-body">
-                    <!-- error queue -->
-                    <template lwc:if={showErrors}>
-                        <template lwc:if={hasFailures}>
-                            <table class="tbl">
-                                <thead>
-                                    <tr>
-                                        <th>Record</th><th>Ramp object</th><th>Reason</th><th class="ta-r"></th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <template for:each={failures} for:item="f">
-                                        <tr key={f.id}>
-                                            <td>
-                                                <div class="cell-strong">{f.name}</div>
-                                                <div class="cell-sub">{f.objType}</div>
-                                            </td>
-                                            <td class="mono">{f.rampId}</td>
-                                            <td class="reason">{f.error}</td>
-                                            <td class="ta-r">
-                                                <button class="btn btn-neutral sm" data-id={f.pipe} data-action={f.action} onclick={handlePipeSync}>
-                                                    <lightning-icon icon-name="utility:redo" size="xx-small"></lightning-icon>
-                                                    <span>Retry</span>
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    </template>
-                                </tbody>
-                            </table>
-                        </template>
-                        <template lwc:else>
-                            <div class="empty">
-                                <lightning-icon icon-name="utility:success" size="small"></lightning-icon>
-                                <div class="empty-title">No errors in the queue</div>
-                                <div class="empty-sub">Every record posted cleanly and was acknowledged by Ramp.</div>
-                            </div>
-                        </template>
-                    </template>
-                </div>
+            <!-- ───────── error queue (active group) ───────── -->
+            <div class="sec-label">
+                <lightning-icon icon-name="utility:error" size="x-small"></lightning-icon>
+                <span>Error queue</span>
+                <div class="spacer"></div>
+                <template lwc:if={activeHasFailures}><span class="sec-hint">{activeFailuresCount} to resolve</span></template>
             </div>
+            <div class="lower-body">
+                <template lwc:if={activeHasFailures}>
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Record</th><th>Ramp object</th><th>Reason</th><th class="ta-r"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template for:each={activeFailures} for:item="f">
+                                <tr key={f.id}>
+                                    <td>
+                                        <div class="cell-strong">{f.name}</div>
+                                        <div class="cell-sub">{f.objType}</div>
+                                    </td>
+                                    <td class="mono">{f.rampId}</td>
+                                    <td class="reason">{f.error}</td>
+                                    <td class="ta-r">
+                                        <button class="btn btn-neutral sm" data-id={f.pipe} data-action={f.action} onclick={handlePipeSync}>
+                                            <lightning-icon icon-name="utility:redo" size="xx-small"></lightning-icon>
+                                            <span>Retry</span>
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </template>
+                <template lwc:else>
+                    <div class="empty">
+                        <lightning-icon icon-name="utility:success" size="small"></lightning-icon>
+                        <div class="empty-title">No errors in this queue</div>
+                        <div class="empty-sub">Every record in this group posted cleanly and was acknowledged by Ramp.</div>
+                    </div>
+                </template>
+            </div>
+            </div>
+            </template>
+            <template lwc:else>
+                <div class="body-loading">
+                    <lightning-spinner alternative-text="Loading Ramp home" size="medium"></lightning-spinner>
+                </div>
+            </template>
         </div>
 
         <!-- ───────── configuration modal ───────── -->

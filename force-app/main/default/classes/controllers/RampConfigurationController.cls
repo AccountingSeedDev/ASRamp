@@ -202,6 +202,23 @@ public with sharing class RampConfigurationController {
     }
 
     /**
+     * @description Kicks off the batch job that syncs vendor Accounts to Ramp.
+     * Independent of the GL-account and accounting-variable syncs.
+     * @return String Job Id and status message
+     */
+    @AuraEnabled
+    public static String syncVendors() {
+        try {
+            // RampVendorSyncBatch() resolves the accounting connection itself.
+            Id jobId = Database.executeBatch(new RampVendorSyncBatch(), 50);
+            return 'Vendor sync started. Job Id: ' + jobId +
+                '. Creates/updates Ramp vendors from vendor Accounts and logs an Automated Job Result.';
+        } catch (Exception e) {
+            throw new AuraHandledException('Error starting vendor sync: ' + e.getMessage());
+        }
+    }
+
+    /**
      * @description Builds a map of field names to their Ramp IDs from existing custom fields
      * @return Map<String, String> Field name to Ramp ID mapping
      */
@@ -252,54 +269,49 @@ public with sharing class RampConfigurationController {
      * Requires the running user to have Modify Metadata Through Metadata API
      * (or Customize Application).
      *
-     * @param credential The credential data to save
+     * @param credential A map of credential fields from the LWC (developerName,
+     *        label, clientId, clientSecret, tokenUrl, apiBaseUrl, scopes, isActive).
+     *        A Map<String,Object> is used rather than a custom Apex class because
+     *        Aura/LWC cannot reliably marshal a JS object into an inner Apex class
+     *        parameter — that fails as a generic "internal server error" before
+     *        the method body runs. A Map marshals cleanly.
      * @return String Success message including the deployment job Id
      */
     @AuraEnabled
-    public static String saveCredential(CredentialWrapper credential) {
+    public static String saveCredential(Map<String, Object> credential) {
         try {
-            if (String.isBlank(credential.developerName)) {
+            String developerName = strVal(credential, 'developerName');
+            String clientId = strVal(credential, 'clientId');
+            String clientSecret = strVal(credential, 'clientSecret');
+            if (String.isBlank(developerName)) {
                 throw new AuraHandledException('Developer Name is required');
             }
-            if (String.isBlank(credential.clientId)) {
+            if (String.isBlank(clientId)) {
                 throw new AuraHandledException('Client ID is required');
             }
-            if (String.isBlank(credential.clientSecret)) {
+            if (String.isBlank(clientSecret)) {
                 throw new AuraHandledException('Client Secret is required');
             }
-
-            // Build the CMDT record. fullName is "<MdtApiName>.<RecordDeveloperName>".
-            Metadata.CustomMetadata md = new Metadata.CustomMetadata();
-            md.fullName = 'Ramp_Credential.' + credential.developerName;
-            md.label = String.isBlank(credential.label) ? credential.developerName : credential.label;
-
-            md.values.add(buildValue('Client_ID__c', credential.clientId));
-            md.values.add(buildValue('Client_Secret__c', credential.clientSecret));
-            if (String.isNotBlank(credential.tokenUrl)) {
-                md.values.add(buildValue('Token_URL__c', credential.tokenUrl));
-            }
-            if (String.isNotBlank(credential.apiBaseUrl)) {
-                md.values.add(buildValue('API_Base_URL__c', credential.apiBaseUrl));
-            }
-            if (String.isNotBlank(credential.scopes)) {
-                md.values.add(buildValue('Scopes__c', credential.scopes));
-            }
-            md.values.add(buildValue('Is_Active__c', credential.isActive));
-
-            Metadata.DeployContainer container = new Metadata.DeployContainer();
-            container.addMetadata(md);
+            String label = strVal(credential, 'label');
+            String tokenUrl = strVal(credential, 'tokenUrl');
+            String apiBaseUrl = strVal(credential, 'apiBaseUrl');
+            String scopes = strVal(credential, 'scopes');
+            Boolean isActive = credential.get('isActive') == true;
 
             // Clear the cached token — once the new credential lands, the next
             // API call should re-OAuth using the updated client id/secret.
             RampAuthService.clearCachedToken();
 
-            // Metadata.Operations.enqueueDeployment performs a real deploy and
-            // can't be exercised in @IsTest context — skip it there so tests
-            // still cover the builder/validation paths.
+            // Deploy the CMDT record from a Queueable so the metadata deployment
+            // runs async and doesn't block the save round-trip. Skip in tests
+            // (the Metadata API can't deploy in an @IsTest context).
             if (Test.isRunningTest()) {
                 return 'Credential validated (test mode — deployment skipped).';
             }
-            Id jobId = Metadata.Operations.enqueueDeployment(container, null);
+            Id jobId = System.enqueueJob(new RampCredentialDeployQueueable(
+                developerName, String.isBlank(label) ? developerName : label,
+                clientId, clientSecret, tokenUrl, apiBaseUrl, scopes, isActive
+            ));
             return 'Credential save submitted. Deployment Job Id: ' + jobId +
                 ' — the new values will be live within a few seconds. ' +
                 'Refresh this page to see them and try Test Connection.';
@@ -308,11 +320,9 @@ public with sharing class RampConfigurationController {
         }
     }
 
-    private static Metadata.CustomMetadataValue buildValue(String fieldApiName, Object value) {
-        Metadata.CustomMetadataValue v = new Metadata.CustomMetadataValue();
-        v.field = fieldApiName;
-        v.value = value;
-        return v;
+    private static String strVal(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        return v == null ? null : String.valueOf(v);
     }
 
     /**

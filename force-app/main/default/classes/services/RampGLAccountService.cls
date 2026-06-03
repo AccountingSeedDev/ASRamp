@@ -60,6 +60,8 @@ public with sharing class RampGLAccountService {
             ];
 
             if (glAccounts.isEmpty()) {
+                RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC, 0, 0, 0,
+                    'No active GL Accounts found to sync.');
                 return 'No active GL Accounts found to sync.';
             }
 
@@ -105,8 +107,13 @@ public with sharing class RampGLAccountService {
             if (created > 0) parts.add('created ' + created + ' (' + totalBatches + ' batch(es))');
             if (restamped > 0) parts.add('restored Ramp_Id__c on ' + restamped + ' existing record(s)');
             if (parts.isEmpty()) parts.add('all GL Accounts already linked — nothing to do');
-            return 'GL Account sync complete: ' + String.join(parts, '; ') + '.';
+            String summary = 'GL Account sync complete: ' + String.join(parts, '; ') + '.';
+            RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC,
+                glAccounts.size(), glAccounts.size(), 0, summary);
+            return summary;
         } catch (Exception e) {
+            RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC, 0, 0, 1,
+                'GL Account sync failed: ' + e.getMessage());
             throw new RampGLAccountException('Error syncing GL Accounts: ' + e.getMessage(), e);
         }
     }

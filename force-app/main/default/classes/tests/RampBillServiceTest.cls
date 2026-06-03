@@ -5,6 +5,9 @@
 @IsTest
 private class RampBillServiceTest {
 
+    // No credential is packaged; inject a synthetic one for the callout path.
+    static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
+
     @TestSetup
     static void setup() {
         TestDataFactory.getInstance().initialize();

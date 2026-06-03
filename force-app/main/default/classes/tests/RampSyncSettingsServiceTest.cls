@@ -79,4 +79,52 @@ private class RampSyncSettingsServiceTest {
 
         System.assertEquals('In Process', RampSyncSettingsService.getDefaultJEStatus());
     }
+
+    @IsTest
+    static void defaultLedger_resolvesByUniqueExtId() {
+        AcctSeed__Ledger__c ledger = TestDataFactory.getInstance().getLedgers()[0];
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        System.runAs(admin) {
+            ledger.AcctSeed__ExtId__c = 'RAMP-LEDGER-001';
+            update ledger;
+        }
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'RAMP-LEDGER-001',
+            Default_JE_Status__c = 'In Process'
+        );
+        RampSyncSettingsService.resetCache();
+
+        Test.startTest();
+        Id resolved = RampSyncSettingsService.getDefaultLedgerId();
+        Test.stopTest();
+
+        System.assertEquals(ledger.Id, resolved, 'resolves by the unique External Id');
+    }
+
+    @IsTest
+    static void defaultLedger_byNameStampsExtId() {
+        AcctSeed__Ledger__c ledger = TestDataFactory.getInstance().getLedgers()[0];
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        System.runAs(admin) {
+            ledger.Name = 'ExtIdTest-Ledger';
+            ledger.AcctSeed__ExtId__c = null;
+            update ledger;
+        }
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'ExtIdTest-Ledger',
+            Default_JE_Status__c = 'In Process'
+        );
+        RampSyncSettingsService.resetCache();
+
+        Test.startTest();
+        Id resolved = RampSyncSettingsService.getDefaultLedgerId();
+        Test.stopTest();
+
+        System.assertEquals(ledger.Id, resolved, 'falls back to Name when no ExtId match');
+        AcctSeed__Ledger__c refreshed = [
+            SELECT AcctSeed__ExtId__c FROM AcctSeed__Ledger__c WHERE Id = :ledger.Id
+        ];
+        System.assertEquals('ExtIdTest-Ledger', refreshed.AcctSeed__ExtId__c,
+            'Name is stamped into the blank External Id so later lookups use the unique key');
+    }
 }

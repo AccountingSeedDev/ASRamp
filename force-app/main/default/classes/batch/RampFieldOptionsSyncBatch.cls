@@ -91,19 +91,27 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     }
 
     /**
-     * @description Finish method - log results
+     * @description Finish method - record an Automated Job Result so every run is
+     * documented (incl. why nothing synced), mirroring the inbound pipelines.
      */
     public void finish(Database.BatchableContext bc) {
-        String summary = 'RampFieldOptionsSyncBatch completed.\n' +
-                        'Created: ' + createdCount + '\n' +
-                        'Updated: ' + updatedCount + '\n' +
-                        'Errors: ' + errorCount;
+        Integer processed = createdCount + updatedCount + errorCount;
+        Integer succeeded = createdCount + updatedCount;
 
+        String notes = 'Created: ' + createdCount + ' · Updated: ' + updatedCount +
+                       ' · Errors: ' + errorCount;
+        if (processed == 0) {
+            notes += '\nNo active GL Account Variables (1-4) were found to sync.';
+        }
         if (!errors.isEmpty()) {
-            summary += '\n\nError details:\n' + String.join(errors, '\n');
+            notes = RampJobResultLogger.appendNote(notes, 'Error details:\n' + String.join(errors, '\n'));
         }
 
-        System.debug(summary);
+        RampJobResultLogger.record(
+            null, RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC, processed, succeeded, errorCount, notes
+        );
+
+        System.debug(notes);
     }
 
     /**

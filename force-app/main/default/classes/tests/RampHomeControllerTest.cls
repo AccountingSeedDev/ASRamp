@@ -5,6 +5,9 @@
 @IsTest
 private class RampHomeControllerTest {
 
+    // No credential is packaged; inject a synthetic one for the callout path.
+    static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
+
     @TestSetup
     static void setup() { TestDataFactory.getInstance().initialize(); }
 
@@ -19,7 +22,7 @@ private class RampHomeControllerTest {
         RampHomeController.HomeData d = RampHomeController.getHomeData();
         Test.stopTest();
 
-        System.assertEquals(4, d.pipelines.size(), 'master + txn + bill + reimb');
+        System.assertEquals(6, d.pipelines.size(), 'gl + var + vendor + txn + bill + reimb');
         Boolean reimbImplemented = false;
         Boolean billImplemented = false;
         for (RampHomeController.Pipeline p : d.pipelines) {
@@ -29,8 +32,8 @@ private class RampHomeControllerTest {
         System.assert(reimbImplemented, 'reimbursement pipeline is live');
         System.assert(billImplemented, 'bill pipeline is live');
 
-        // Automated Job Results feed the metrics.
-        System.assertEquals(3, d.jobs.size());
+        // Automated Job Results feed the metrics (3 transaction + 3 master jobs).
+        System.assertEquals(6, d.jobs.size());
         System.assert(d.recordsProcessed >= 10, 'recordsProcessed sourced from AJR');
         Boolean cardSeen = false;
         for (RampHomeController.JobMetric j : d.jobs) {

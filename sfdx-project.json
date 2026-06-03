@@ -1,15 +1,16 @@
 {
   "packageDirectories": [
     {
-      "versionName": "ver 0.1",
-      "versionNumber": "0.1.0.NEXT",
+      "versionName": "ver 0.3",
+      "versionNumber": "0.3.0.NEXT",
       "path": "force-app",
       "default": true,
       "package": "ASRamp",
       "versionDescription": "",
+      "ancestorVersion": "HIGHEST",
       "dependencies": [
         {
-          "package": "Accounting Seed Financial Suite (1GP) @3.348"
+          "package": "Accounting Seed Financial Suite (1GP) @3.392"
         }
       ]
     }
@@ -19,8 +20,11 @@
   "sfdcLoginUrl": "https://login.salesforce.com",
   "sourceApiVersion": "65.0",
   "packageAliases": {
+    "Accounting Seed Financial Suite (1GP) @3.392": "04tg800000071QnAAI",
     "Accounting Seed Financial Suite (1GP) @3.348": "04tHo000000hdf3IAA",
     "ASRamp": "0HoRi000000F3OzKAK",
-    "ASRamp@0.1.0-1": "04tRi000000lktpIAA"
+    "ASRamp@0.1.0-1": "04tRi000000lktpIAA",
+    "ASRamp@0.2.0-1": "04tRi000000t30TIAQ",
+    "ASRamp@0.3.0-1": "04tRi000000t3q5IAA"
   }
 }

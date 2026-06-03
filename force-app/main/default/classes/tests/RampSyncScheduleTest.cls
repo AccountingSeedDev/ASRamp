@@ -23,15 +23,15 @@ private class RampSyncScheduleTest {
         System.assertEquals(1, triggerCount('bill'), 'reschedule replaces');
 
         // A different pipeline schedules independently.
-        RampHomeController.schedulePipeline('master', 'WEEKDAYS', 6);
-        System.assertEquals(1, triggerCount('master'));
+        RampHomeController.schedulePipeline('gl', 'WEEKDAYS', 6);
+        System.assertEquals(1, triggerCount('gl'));
         System.assertEquals(1, triggerCount('bill'));
 
         // Clear.
         String m3 = RampHomeController.unschedulePipeline('bill');
         Test.stopTest();
         System.assertEquals(0, triggerCount('bill'), 'cleared');
-        System.assertEquals(1, triggerCount('master'), 'other pipeline untouched');
+        System.assertEquals(1, triggerCount('gl'), 'other pipeline untouched');
     }
 
     @IsTest
@@ -50,6 +50,9 @@ private class RampSyncScheduleTest {
         // Not wrapped in start/stop — the enqueued queueables stay queued (never
         // run), so no callouts fire; this just covers the dispatch branches.
         new RampSyncSchedulable(RampSyncSchedulable.PIPE_MASTER).execute(null);
+        new RampSyncSchedulable(RampSyncSchedulable.PIPE_GL).execute(null);
+        new RampSyncSchedulable(RampSyncSchedulable.PIPE_VAR).execute(null);
+        new RampSyncSchedulable(RampSyncSchedulable.PIPE_VENDOR).execute(null);
         new RampSyncSchedulable(RampSyncSchedulable.PIPE_TXN).execute(null);
         new RampSyncSchedulable(RampSyncSchedulable.PIPE_BILL).execute(null);
         new RampSyncSchedulable(RampSyncSchedulable.PIPE_REIMB).execute(null);

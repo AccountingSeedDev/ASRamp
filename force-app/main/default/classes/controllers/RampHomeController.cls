@@ -16,6 +16,7 @@ public with sharing class RampHomeController {
     // ───────────────────────── wrapper types ─────────────────────────
     public class Pipeline {
         @AuraEnabled public String id;
+        @AuraEnabled public String groupKey;   // 'master' | 'transaction'
         @AuraEnabled public String name;
         @AuraEnabled public String shortName;
         @AuraEnabled public String target;
@@ -55,6 +56,7 @@ public with sharing class RampHomeController {
 
     public class Failure {
         @AuraEnabled public String id;
+        @AuraEnabled public String groupKey;   // 'master' | 'transaction'
         @AuraEnabled public String name;
         @AuraEnabled public String rampId;
         @AuraEnabled public String objType;
@@ -62,6 +64,7 @@ public with sharing class RampHomeController {
         @AuraEnabled public String action;     // which sync to re-run
         @AuraEnabled public Date theDate;
         @AuraEnabled public String error;
+        @AuraEnabled public Boolean retryable = true;
     }
 
     /** Live connection status from getConnectionStatus (real Ramp API call). */
@@ -74,6 +77,7 @@ public with sharing class RampHomeController {
     /** Run-level metrics sourced from Automated Job Results. */
     public class JobMetric {
         @AuraEnabled public String jobType;
+        @AuraEnabled public String groupKey;   // 'master' | 'transaction'
         @AuraEnabled public String label;
         @AuraEnabled public Integer processed = 0;
         @AuraEnabled public Integer succeeded = 0;
@@ -118,7 +122,12 @@ public with sharing class RampHomeController {
             Integer glTotal = nz(gl.get('total'));
             Integer glSynced = nz(gl.get('synced'));
             Integer glPending = nz(gl.get('not_synced'));
-            Integer varCount = [SELECT COUNT() FROM AcctSeed__Accounting_Variable__c];
+            Map<String, Integer> varStats = variableStats();
+            Integer varTotal = nz(varStats.get('total'));
+            Integer varSynced = nz(varStats.get('synced'));
+            Map<String, Integer> vendorStatsMap = vendorStats();
+            Integer vendorTotal = nz(vendorStatsMap.get('total'));
+            Integer vendorSynced = nz(vendorStatsMap.get('synced'));
 
             // Live record-state stats per pipeline.
             Map<String, Integer> tx = jeStats();
@@ -149,7 +158,8 @@ public with sharing class RampHomeController {
             d.donePct = d.steps.isEmpty() ? 0 : (Integer) Math.round(100.0 * doneCount / d.steps.size());
             d.setupComplete = doneCount == d.steps.size();
 
-            d.pipelines = buildPipelines(glTotal, glSynced, glPending, varCount, tx, bill, reimb, ajr);
+            d.pipelines = buildPipelines(glTotal, glSynced, glPending, varTotal, varSynced,
+                vendorTotal, vendorSynced, tx, bill, reimb, ajr);
 
             // Attach per-pipeline scheduled-job state.
             Map<String, CronTrigger> sched = scheduledByPipeline();
@@ -163,7 +173,7 @@ public with sharing class RampHomeController {
                 }
             }
 
-            d.failures = recentFailures();
+            d.failures = recentFailures(ajr);
             return d;
         } catch (Exception e) {
             throw new AuraHandledException('Error loading Ramp home: ' + e.getMessage());
@@ -172,7 +182,8 @@ public with sharing class RampHomeController {
 
     // ───────────────────────── scheduling ─────────────────────────
     private static final Map<String, String> PIPE_LABELS = new Map<String, String>{
-        'master' => 'Master data sync', 'txn' => 'Card transactions', 'bill' => 'Bills', 'reimb' => 'Reimbursements'
+        'gl' => 'GL accounts', 'var' => 'Accounting variables', 'vendor' => 'Vendors',
+        'txn' => 'Card transactions', 'bill' => 'Bills', 'reimb' => 'Reimbursements'
     };
 
     /**
@@ -312,14 +323,17 @@ public with sharing class RampHomeController {
     public static ConnStatus getConnectionStatus() {
         ConnStatus s = new ConnStatus();
 
-        List<Ramp_Credential__mdt> creds = [
-            SELECT Label FROM Ramp_Credential__mdt WHERE Is_Active__c = true LIMIT 1
-        ];
-        s.business = creds.isEmpty() ? 'Your Ramp workspace' : creds[0].Label;
-        if (creds.isEmpty()) {
+        // Resolve the active credential through RampAuthService (single source of
+        // truth + test seam). No credential configured → report not connected.
+        Ramp_Credential__mdt cred;
+        try {
+            cred = RampAuthService.getActiveCredential();
+        } catch (Exception e) {
+            s.business = 'Your Ramp workspace';
             s.detail = 'No active Ramp credential is configured.';
             return s;
         }
+        s.business = String.isBlank(cred.Label) ? 'Your Ramp workspace' : cred.Label;
 
         try {
             HttpResponse res = RampAPIService.get('/developer/v1/business');
@@ -363,6 +377,38 @@ public with sharing class RampHomeController {
     // ───────────────────────── stats helpers ─────────────────────────
     private static Integer nz(Integer i) { return i == null ? 0 : i; }
 
+    // Active GL Account Variables 1-4 (what the field-options sync pushes to Ramp);
+    // "synced" = those whose Ramp field-option Id has been stamped back.
+    private static Map<String, Integer> variableStats() {
+        Set<String> types = new Set<String>{
+            'GL Account Variable 1', 'GL Account Variable 2',
+            'GL Account Variable 3', 'GL Account Variable 4'
+        };
+        Integer total = [
+            SELECT COUNT() FROM AcctSeed__Accounting_Variable__c
+            WHERE AcctSeed__Active__c = true AND AcctSeed__Type__c IN :types
+        ];
+        Integer synced = [
+            SELECT COUNT() FROM AcctSeed__Accounting_Variable__c
+            WHERE AcctSeed__Active__c = true AND AcctSeed__Type__c IN :types
+              AND Ramp_Field_Option_Id__c != null
+        ];
+        return new Map<String, Integer>{ 'total' => total, 'synced' => synced };
+    }
+
+    // Vendor Accounts pushed to Ramp; "synced" = those whose Ramp_Vendor_Id__c is stamped.
+    private static Map<String, Integer> vendorStats() {
+        Set<String> vtypes = new Set<String>{ 'Vendor', 'Customer and Vendor' };
+        Integer total = [
+            SELECT COUNT() FROM Account WHERE AcctSeed__Accounting_Type__c IN :vtypes
+        ];
+        Integer synced = [
+            SELECT COUNT() FROM Account
+            WHERE AcctSeed__Accounting_Type__c IN :vtypes AND Ramp_Vendor_Id__c != null
+        ];
+        return new Map<String, Integer>{ 'total' => total, 'synced' => synced };
+    }
+
     private static Map<String, Integer> jeStats() {
         Map<String, Integer> s = new Map<String, Integer>{ 'pending' => 0, 'synced' => 0, 'failed' => 0, 'total' => 0 };
         for (AggregateResult ar : [
@@ -397,7 +443,8 @@ public with sharing class RampHomeController {
     private static Map<String, AcctSeed__Automated_Job_Results__c> latestJobResults() {
         Map<String, AcctSeed__Automated_Job_Results__c> latest = new Map<String, AcctSeed__Automated_Job_Results__c>();
         for (AcctSeed__Automated_Job_Results__c r : [
-            SELECT Id, AcctSeed__Schedule_Job_Type__c, AcctSeed__Processed__c, AcctSeed__Succeeded__c, AcctSeed__Failed__c, CreatedDate
+            SELECT Id, AcctSeed__Schedule_Job_Type__c, AcctSeed__Processed__c, AcctSeed__Succeeded__c,
+                   AcctSeed__Failed__c, AcctSeed__Notes__c, CreatedDate
             FROM AcctSeed__Automated_Job_Results__c
             WHERE AcctSeed__Schedule_Job_Type__c LIKE 'Ramp %'
             ORDER BY CreatedDate DESC
@@ -411,15 +458,19 @@ public with sharing class RampHomeController {
 
     private static List<JobMetric> buildJobs(Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
         List<JobMetric> jobs = new List<JobMetric>();
-        jobs.add(jobMetric(RampJobResultLogger.JOB_CARD_SYNC, 'Card transactions', ajr));
-        jobs.add(jobMetric(RampJobResultLogger.JOB_BILL_SYNC, 'Bills', ajr));
-        jobs.add(jobMetric(RampJobResultLogger.JOB_REIMBURSEMENT_SYNC, 'Reimbursements', ajr));
+        jobs.add(jobMetric(RampJobResultLogger.JOB_CARD_SYNC, 'Card transactions', 'transaction', ajr));
+        jobs.add(jobMetric(RampJobResultLogger.JOB_BILL_SYNC, 'Bills', 'transaction', ajr));
+        jobs.add(jobMetric(RampJobResultLogger.JOB_REIMBURSEMENT_SYNC, 'Reimbursements', 'transaction', ajr));
+        jobs.add(jobMetric(RampJobResultLogger.JOB_GL_SYNC, 'GL accounts', 'master', ajr));
+        jobs.add(jobMetric(RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC, 'Accounting variables', 'master', ajr));
+        jobs.add(jobMetric(RampJobResultLogger.JOB_VENDOR_SYNC, 'Vendors', 'master', ajr));
         return jobs;
     }
 
-    private static JobMetric jobMetric(String jobType, String label, Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
+    private static JobMetric jobMetric(String jobType, String label, String groupKey, Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
         JobMetric j = new JobMetric();
         j.jobType = jobType;
+        j.groupKey = groupKey;
         j.label = label;
         AcctSeed__Automated_Job_Results__c r = ajr.get(jobType);
         if (r == null) {
@@ -461,21 +512,28 @@ public with sharing class RampHomeController {
 
     // ───────────────────────── pipelines ─────────────────────────
     private static List<Pipeline> buildPipelines(Integer glTotal, Integer glSynced, Integer glPending,
-            Integer varCount, Map<String, Integer> tx, Map<String, Integer> bill, Map<String, Integer> reimb,
+            Integer varTotal, Integer varSynced, Integer vendorTotal, Integer vendorSynced,
+            Map<String, Integer> tx, Map<String, Integer> bill, Map<String, Integer> reimb,
             Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
         List<Pipeline> pipes = new List<Pipeline>();
 
-        Pipeline master = new Pipeline();
-        master.id = 'master'; master.name = 'Master data sync'; master.shortName = 'Master data';
-        master.target = 'GL accounts · Variables · Vendors'; master.direction = 'out';
-        master.fromLabel = 'Accounting Seed'; master.toLabel = 'Ramp'; master.icon = 'database';
-        master.implemented = true; master.synced = glSynced; master.pending = glPending; master.failed = 0;
-        master.records = glTotal + ' GL accounts · ' + varCount + ' variables';
-        master.statusKind = glTotal == 0 ? 'notset' : (glPending > 0 ? 'warning' : 'active');
-        master.blurb = 'Pushes the chart of accounts and dimensions to Ramp so card coding stays in lockstep.';
-        master.action = 'syncGL';
-        pipes.add(master);
+        // ── Master data (Accounting Seed → Ramp). Three independent syncs. ──
+        pipes.add(masterPipe('gl', 'GL accounts', 'GL accounts', 'Chart of accounts', 'database',
+            glSynced, glPending, glTotal, glTotal + ' GL accounts', 'syncGL',
+            'Pushes the chart of accounts to Ramp so card coding maps to the right GL.',
+            RampJobResultLogger.JOB_GL_SYNC, ajr));
 
+        pipes.add(masterPipe('var', 'Accounting variables', 'Variables', 'GL Account Variables 1-4', 'apps',
+            varSynced, (varTotal - varSynced), varTotal, varTotal + ' variables', 'syncVar',
+            'Pushes GL Account Variables to Ramp as accounting field options for transaction coding.',
+            RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC, ajr));
+
+        pipes.add(masterPipe('vendor', 'Vendors', 'Vendors', 'Vendor accounts', 'building',
+            vendorSynced, (vendorTotal - vendorSynced), vendorTotal, vendorTotal + ' vendors', 'syncVendor',
+            'Pushes vendor Accounts to Ramp so bills and payments map to the right vendor.',
+            RampJobResultLogger.JOB_VENDOR_SYNC, ajr));
+
+        // ── Transaction data (Ramp → Accounting Seed). ──
         pipes.add(payablePipe('txn', 'Card transactions', 'Transactions', 'Journal Entries', 'in', 'card',
             tx, tx.get('synced') + ' journal entries', 'syncTxn',
             'Cleared card spend posts as balanced journal entries — expense debit, card clearing credit.',
@@ -494,11 +552,29 @@ public with sharing class RampHomeController {
         return pipes;
     }
 
+    // Outbound master-data pipeline card (GL accounts / variables / vendors).
+    private static Pipeline masterPipe(String id, String name, String shortName, String target, String icon,
+            Integer synced, Integer pending, Integer total, String records, String action, String blurb,
+            String jobType, Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
+        Pipeline p = new Pipeline();
+        p.id = id; p.groupKey = 'master'; p.name = name; p.shortName = shortName; p.target = target;
+        p.direction = 'out'; p.fromLabel = 'Accounting Seed'; p.toLabel = 'Ramp'; p.icon = icon;
+        p.implemented = true; p.synced = synced; p.pending = pending; p.failed = 0;
+        p.records = records; p.action = action; p.blurb = blurb;
+        p.statusKind = total == 0 ? 'notset' : (pending > 0 ? 'warning' : 'active');
+        AcctSeed__Automated_Job_Results__c r = ajr.get(jobType);
+        if (r != null) {
+            p.lastRun = 'Last run: ' + (Integer) nzDec(r.AcctSeed__Processed__c) + ' processed · '
+                + (Integer) nzDec(r.AcctSeed__Failed__c) + ' failed';
+        }
+        return p;
+    }
+
     private static Pipeline payablePipe(String id, String name, String shortName, String target, String direction,
             String icon, Map<String, Integer> stats, String records, String action, String blurb,
             String jobType, Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
         Pipeline p = new Pipeline();
-        p.id = id; p.name = name; p.shortName = shortName; p.target = target; p.direction = direction;
+        p.id = id; p.groupKey = 'transaction'; p.name = name; p.shortName = shortName; p.target = target; p.direction = direction;
         p.fromLabel = 'Ramp'; p.toLabel = 'Accounting Seed'; p.icon = icon;
         p.implemented = true;
         p.synced = nz(stats.get('synced')); p.pending = nz(stats.get('pending')); p.failed = nz(stats.get('failed'));
@@ -543,14 +619,16 @@ public with sharing class RampHomeController {
     }
 
     // ───────────────────────── follow-up queue ─────────────────────────
-    private static List<Failure> recentFailures() {
+    private static List<Failure> recentFailures(Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
         List<Failure> rows = new List<Failure>();
+
+        // ── Transaction group: per-record failures (have Ramp_Sync_Error__c). ──
         for (AcctSeed__Journal_Entry__c je : [
             SELECT Id, Name, AcctSeed__ExtId__c, AcctSeed__Journal_Date__c, Ramp_Sync_Error__c
             FROM AcctSeed__Journal_Entry__c WHERE Ramp_Sync_Status__c = 'Failed'
             ORDER BY LastModifiedDate DESC LIMIT 25
         ]) {
-            rows.add(failure(je.Id, je.Name, je.AcctSeed__ExtId__c, 'Journal Entry', 'txn', 'syncTxn', je.AcctSeed__Journal_Date__c, je.Ramp_Sync_Error__c));
+            rows.add(failure('transaction', je.Id, je.Name, je.AcctSeed__ExtId__c, 'Journal Entry', 'txn', 'syncTxn', je.AcctSeed__Journal_Date__c, je.Ramp_Sync_Error__c, true));
         }
         for (AcctSeed__Account_Payable__c ap : [
             SELECT Id, Name, AcctSeed__ExtId__c, AcctSeed__Date__c, Ramp_Sync_Error__c, AcctSeed__Employee__c
@@ -558,14 +636,38 @@ public with sharing class RampHomeController {
             ORDER BY LastModifiedDate DESC LIMIT 25
         ]) {
             Boolean isReimb = ap.AcctSeed__Employee__c != null;
-            rows.add(failure(ap.Id, ap.Name, ap.AcctSeed__ExtId__c, isReimb ? 'Reimbursement Payable' : 'Vendor Payable',
-                isReimb ? 'reimb' : 'bill', isReimb ? 'syncReimb' : 'syncBill', ap.AcctSeed__Date__c, ap.Ramp_Sync_Error__c));
+            rows.add(failure('transaction', ap.Id, ap.Name, ap.AcctSeed__ExtId__c, isReimb ? 'Reimbursement Payable' : 'Vendor Payable',
+                isReimb ? 'reimb' : 'bill', isReimb ? 'syncReimb' : 'syncBill', ap.AcctSeed__Date__c, ap.Ramp_Sync_Error__c, true));
+        }
+
+        // ── Master group: no per-record error fields, so surface the latest run's
+        // Automated Job Result when it reported failures (reason = AJR notes). ──
+        rows.addAll(masterFailures(ajr));
+        return rows;
+    }
+
+    private static List<Failure> masterFailures(Map<String, AcctSeed__Automated_Job_Results__c> ajr) {
+        List<Failure> rows = new List<Failure>();
+        Map<String, List<String>> meta = new Map<String, List<String>>{
+            RampJobResultLogger.JOB_GL_SYNC          => new List<String>{ 'GL accounts', 'gl', 'syncGL' },
+            RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC => new List<String>{ 'Accounting variables', 'var', 'syncVar' },
+            RampJobResultLogger.JOB_VENDOR_SYNC      => new List<String>{ 'Vendors', 'vendor', 'syncVendor' }
+        };
+        for (String jobType : meta.keySet()) {
+            AcctSeed__Automated_Job_Results__c r = ajr.get(jobType);
+            if (r == null || (Integer) nzDec(r.AcctSeed__Failed__c) <= 0) continue;
+            List<String> m = meta.get(jobType);
+            Failure f = failure('master', r.Id, m[0], null, 'Master data sync', m[1], m[2],
+                r.CreatedDate.date(), r.AcctSeed__Notes__c, true);
+            rows.add(f);
         }
         return rows;
     }
-    private static Failure failure(Id recId, String name, String rampId, String objType, String pipe, String action, Date d, String error) {
+
+    private static Failure failure(String groupKey, Id recId, String name, String rampId, String objType, String pipe, String action, Date d, String error, Boolean retryable) {
         Failure f = new Failure();
-        f.id = recId; f.name = name; f.rampId = rampId; f.objType = objType; f.pipe = pipe; f.action = action; f.theDate = d; f.error = error;
+        f.groupKey = groupKey; f.id = recId; f.name = name; f.rampId = rampId; f.objType = objType;
+        f.pipe = pipe; f.action = action; f.theDate = d; f.error = error; f.retryable = retryable;
         return f;
     }
 }

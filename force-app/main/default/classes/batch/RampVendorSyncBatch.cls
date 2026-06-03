@@ -188,17 +188,23 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
      * @description Finish method - log results
      */
     public void finish(Database.BatchableContext bc) {
-        String summary = 'RampVendorSyncBatch completed.\n' +
-                        'Created: ' + createdCount + '\n' +
-                        'Updated: ' + updatedCount + '\n' +
-                        'Restored: ' + restoredCount + '\n' +
-                        'Errors: ' + errorCount;
+        Integer processed = createdCount + updatedCount + restoredCount + errorCount;
+        Integer succeeded = createdCount + updatedCount + restoredCount;
 
+        String notes = 'Created: ' + createdCount + ' · Updated: ' + updatedCount +
+                       ' · Restored: ' + restoredCount + ' · Errors: ' + errorCount;
+        if (processed == 0) {
+            notes += '\nNo vendor Accounts (Accounting Type Vendor / Customer and Vendor) were found to sync.';
+        }
         if (!errors.isEmpty()) {
-            summary += '\n\nError details:\n' + String.join(errors, '\n');
+            notes = RampJobResultLogger.appendNote(notes, 'Error details:\n' + String.join(errors, '\n'));
         }
 
-        System.debug(summary);
+        RampJobResultLogger.record(
+            null, RampJobResultLogger.JOB_VENDOR_SYNC, processed, succeeded, errorCount, notes
+        );
+
+        System.debug(notes);
     }
 
     /**

@@ -4,6 +4,9 @@
 @IsTest
 private class RampFieldOptionsSyncBatchTest {
 
+    // No credential is packaged; inject a synthetic one for the callout path.
+    static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
+
     private static final String TEST_CONNECTION_ID = 'test-connection-12345678-1234-1234-1234-123456789012';
 
     @TestSetup
@@ -84,6 +87,19 @@ private class RampFieldOptionsSyncBatchTest {
         // Batch should still complete, but with errors logged
         AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
         System.assertEquals('Completed', job.Status, 'Batch should complete even with missing field IDs');
+
+        // An Automated Job Result should document the run and WHY it failed.
+        List<AcctSeed__Automated_Job_Results__c> ajrs = [
+            SELECT AcctSeed__Failed__c, AcctSeed__Notes__c
+            FROM AcctSeed__Automated_Job_Results__c
+            WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+        ];
+        System.assertEquals(1, ajrs.size(), 'The variable sync run should log one AJR');
+        System.assert(ajrs[0].AcctSeed__Failed__c > 0, 'Missing field id should be recorded as a failure');
+        System.assert(
+            ajrs[0].AcctSeed__Notes__c.contains('No Ramp field ID found'),
+            'AJR notes should explain why records did not sync: ' + ajrs[0].AcctSeed__Notes__c
+        );
     }
 
     @IsTest

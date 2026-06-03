@@ -4,6 +4,9 @@
 @IsTest
 private class RampVendorSyncBatchTest {
 
+    // No credential is packaged; inject a synthetic one for the callout path.
+    static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
+
     private static final String TEST_CONNECTION_ID = 'test-connection-12345678-1234-1234-1234-123456789012';
 
     @TestSetup

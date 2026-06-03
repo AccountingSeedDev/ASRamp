@@ -67,3 +67,5 @@ target/
 # JetBrains IDE module files
 *.iml
 .idea/
+
+screenshots/

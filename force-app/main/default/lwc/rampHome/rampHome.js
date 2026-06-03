@@ -7,6 +7,8 @@ import syncTransactions from '@salesforce/apex/RampConfigurationController.syncT
 import syncGLAccounts from '@salesforce/apex/RampConfigurationController.syncGLAccounts';
 import syncBills from '@salesforce/apex/RampConfigurationController.syncBills';
 import syncReimbursements from '@salesforce/apex/RampConfigurationController.syncReimbursements';
+import syncAccountingVariables from '@salesforce/apex/RampConfigurationController.syncAccountingVariables';
+import syncVendors from '@salesforce/apex/RampConfigurationController.syncVendors';
 import schedulePipeline from '@salesforce/apex/RampHomeController.schedulePipeline';
 import unschedulePipeline from '@salesforce/apex/RampHomeController.unschedulePipeline';
 import getPipelineAvailability from '@salesforce/apex/RampHomeController.getPipelineAvailability';
@@ -21,6 +23,8 @@ const FREQ_OPTIONS = [
 
 const ICONS = {
     database: 'utility:database',
+    apps: 'utility:apps',
+    building: 'utility:company',
     card: 'utility:money',
     file: 'utility:file',
     receipt: 'utility:people'
@@ -46,7 +50,7 @@ const STEP_TAB = {
 export default class RampHome extends NavigationMixin(LightningElement) {
     @track home;
     @track busy = {};
-    @track lowerTab = 'errors';
+    @track pipeTab = 'transaction';   // active Sync-pipelines tab: 'transaction' | 'master'
     @track showConfig = false;        // configuration modal open?
     @track configTab = 'authorization';
     @track scheduleFor = null;   // pipeline id whose scheduler panel is open
@@ -170,7 +174,7 @@ export default class RampHome extends NavigationMixin(LightningElement) {
         const h = this.home;
         return [
             { key: 'a', label: 'Records processed', value: this._n(h.recordsProcessed), sub: 'latest sync runs', toneCls: 'kpi-sub muted' },
-            { key: 'b', label: 'GL accounts in sync', value: this._glSyncedLabel(), sub: 'master data', toneCls: 'kpi-sub muted' },
+            { key: 'b', label: 'Master records in sync', value: this._glSyncedLabel(), sub: 'GL accounts + variables', toneCls: 'kpi-sub muted' },
             { key: 'c', label: 'Pending acknowledgement', value: this._n(h.pendingTotal), sub: h.pendingTotal ? 'awaiting Ramp acknowledgement' : 'all caught up', toneCls: h.pendingTotal ? 'kpi-sub warn' : 'kpi-sub good' },
             { key: 'd', label: 'Need follow-up', value: this._n(h.failedTotal), sub: h.failedTotal ? 'records to resolve' : 'no failures', toneCls: h.failedTotal ? 'kpi-sub bad' : 'kpi-sub good' }
         ];
@@ -205,8 +209,10 @@ export default class RampHome extends NavigationMixin(LightningElement) {
         });
     }
     _glSyncedLabel() {
-        const m = this.home.pipelines.find((p) => p.id === 'master');
-        return m ? this._n(m.synced) : '0';
+        const total = (this.home.pipelines || [])
+            .filter((p) => p.groupKey === 'master')
+            .reduce((sum, p) => sum + (p.synced || 0), 0);
+        return this._n(total);
     }
 
     get pipelines() {
@@ -265,13 +271,22 @@ export default class RampHome extends NavigationMixin(LightningElement) {
     get failures() { return this.home ? this.home.failures : []; }
     get hasFailures() { return this.failures.length > 0; }
 
-    get tabErrorsCls() { return this._tabCls('errors'); }
-    get showErrors() { return this.lowerTab === 'errors'; }
-    get errorTabLabel() { return this.hasFailures ? `Error queue · ${this.failures.length}` : 'Error queue'; }
-    _tabCls(id) { return this.lowerTab === id ? 'ltab ltab-on' : 'ltab'; }
+    // ── Sync-pipelines tabs: Transaction (default + first), then Master data.
+    // Each tab scopes its own pipeline cards, recent runs, and error queue.
+    selectPipeTab(e) { this.pipeTab = e.currentTarget.dataset.id; }
+    get txnTabCls() { return this.pipeTab === 'transaction' ? 'ptab ptab-on' : 'ptab'; }
+    get masterTabCls() { return this.pipeTab === 'master' ? 'ptab ptab-on' : 'ptab'; }
+    get activePipelines() { return this.pipelines.filter((p) => p.groupKey === this.pipeTab); }
+    get activeJobs() { return this.jobs.filter((j) => j.groupKey === this.pipeTab); }
+    get activeFailures() { return this.failures.filter((f) => f.groupKey === this.pipeTab); }
+    get activeHasFailures() { return this.activeFailures.length > 0; }
+    get activeFailuresCount() { return this.activeFailures.length; }
 
-    // ── actions ──
-    selectTab(e) { this.lowerTab = e.currentTarget.dataset.id; }
+    // Health-strip "Review errors" → jump to a tab that has failures.
+    reviewErrors() {
+        if (this.failures.some((f) => f.groupKey === 'transaction')) this.pipeTab = 'transaction';
+        else if (this.failures.some((f) => f.groupKey === 'master')) this.pipeTab = 'master';
+    }
 
     // ── configuration modal ──
     openConfig(e) {
@@ -296,7 +311,9 @@ export default class RampHome extends NavigationMixin(LightningElement) {
         this._run(id, action);
     }
     handleSyncAll() {
-        this._run('master', 'syncGL');
+        this._run('gl', 'syncGL');
+        this._run('var', 'syncVar');
+        this._run('vendor', 'syncVendor');
         this._run('txn', 'syncTxn');
         this._run('bill', 'syncBill');
         this._run('reimb', 'syncReimb');
@@ -334,6 +351,8 @@ export default class RampHome extends NavigationMixin(LightningElement) {
     _run(id, action) {
         if (this.busy[id]) return;
         const fn = action === 'syncGL' ? syncGLAccounts
+            : action === 'syncVar' ? syncAccountingVariables
+            : action === 'syncVendor' ? syncVendors
             : action === 'syncTxn' ? syncTransactions
             : action === 'syncBill' ? syncBills
             : action === 'syncReimb' ? syncReimbursements
