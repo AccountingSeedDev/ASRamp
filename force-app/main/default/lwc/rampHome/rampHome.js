@@ -39,12 +39,11 @@ const STATUS = {
 };
 
 // Maps a setup step to the rampConfiguration tab that completes it.
+// Steps with no entry (master, settings, firstrun) are completed on this
+// page itself — their chips jump to the matching pipelines tab instead.
 const STEP_TAB = {
     connect: 'authorization',
-    acctconn: 'authorization',
-    master: 'glaccounts',
-    settings: 'glaccounts',
-    firstrun: 'glaccounts'
+    acctconn: 'authorization'
 };
 
 export default class RampHome extends NavigationMixin(LightningElement) {
@@ -142,18 +141,12 @@ export default class RampHome extends NavigationMixin(LightningElement) {
             n: i + 1,
             isDone: s.state === 'done',
             isCurrent: s.state === 'current',
-            tab: STEP_TAB[s.id] || 'authorization',
+            tab: STEP_TAB[s.id] || '',
             cls: `step-chip step-${s.state}`,
             badgeCls: `step-badge step-badge-${s.state}`
         }));
     }
 
-    // Tab the "Continue setup" button should jump to (the first unfinished step).
-    get nextStepTab() {
-        if (!this.home) return 'authorization';
-        const s = this.home.steps.find((x) => x.state === 'current');
-        return s ? (STEP_TAB[s.id] || 'authorization') : 'authorization';
-    }
 
     get healthHealthy() { return this.home && this.home.failedTotal === 0; }
     get healthClass() { return this.healthHealthy ? 'strip strip-good' : 'strip strip-bad'; }
@@ -290,13 +283,26 @@ export default class RampHome extends NavigationMixin(LightningElement) {
 
     // ── configuration modal ──
     openConfig(e) {
-        const tab = (e && e.currentTarget && e.currentTarget.dataset.tab) || 'authorization';
-        this.configTab = tab;
-        this.showConfig = true;
+        const ds = (e && e.currentTarget && e.currentTarget.dataset) || {};
+        this.jumpToStep(ds.step, ds.tab);
     }
     openConfigNext() {
-        this.configTab = this.nextStepTab;
-        this.showConfig = true;
+        const s = this.home && this.home.steps.find((x) => x.state === 'current');
+        this.jumpToStep(s ? s.id : null, null);
+    }
+    // Open whatever surface completes a setup step: the config modal for
+    // credential steps, or the matching Sync-pipelines tab for steps that are
+    // done right on this page (master data sync, first transaction sync).
+    jumpToStep(stepId, explicitTab) {
+        const tab = explicitTab || STEP_TAB[stepId] || (stepId ? '' : 'authorization');
+        if (tab) {
+            this.configTab = tab;
+            this.showConfig = true;
+            return;
+        }
+        if (stepId === 'master') this.pipeTab = 'master';
+        if (stepId === 'firstrun') this.pipeTab = 'transaction';
+        // 'settings' lives in Setup (Ramp Sync Settings custom metadata) — nothing to open here.
     }
     stopProp(e) { e.stopPropagation(); }
     closeConfig() {

@@ -55,7 +55,7 @@
                     <div class="setup-bar"><div class="setup-bar-fill" style={progressStyle}></div></div>
                     <div class="steps">
                         <template for:each={steps} for:item="s">
-                            <button key={s.id} class={s.cls} data-tab={s.tab} onclick={openConfig}>
+                            <button key={s.id} class={s.cls} data-step={s.id} data-tab={s.tab} onclick={openConfig}>
                                 <div class={s.badgeCls}>
                                     <template lwc:if={s.isDone}>&#10003;</template>
                                     <template lwc:else>{s.n}</template>

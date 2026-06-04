@@ -67,6 +67,19 @@ private class RampJournalEntryBuilderTest {
         return gl;
     }
 
+    private static Account createVendorAccount(String name, String rampVendorId) {
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        Account a = new Account(
+            Name = name,
+            AcctSeed__Accounting_Type__c = 'Vendor',
+            Ramp_Vendor_Id__c = rampVendorId
+        );
+        System.runAs(admin) {
+            insert a;
+        }
+        return a;
+    }
+
     private static AcctSeed__Accounting_Variable__c createVariable(String varType, String rampOptionUuid) {
         User admin = TestDataFactory.getInstance().getAdminUser();
         AcctSeed__Accounting_Variable__c var = new AcctSeed__Accounting_Variable__c(
@@ -162,6 +175,8 @@ private class RampJournalEntryBuilderTest {
         System.assertEquals(50.0, debit.AcctSeed__Debit__c);
         System.assertEquals(null, debit.AcctSeed__Credit__c);
         System.assertEquals(pickPeriodDate(), debit.AcctSeed__Date__c, 'Debit line carries the txn date');
+        System.assertEquals('Acme Coffee', debit.Ramp_Vendor_Name__c, 'Merchant name carried onto the line');
+        System.assertEquals(null, debit.AcctSeed__Account__c, 'Untracked merchant must not match an Account');
 
         // Credit (clearing) line
         AcctSeed__Journal_Entry_Line__c credit = tb.lines[1];
@@ -169,6 +184,7 @@ private class RampJournalEntryBuilderTest {
         System.assertEquals(50.0, credit.AcctSeed__Credit__c);
         System.assertEquals(null, credit.AcctSeed__Debit__c);
         System.assertEquals(pickPeriodDate(), credit.AcctSeed__Date__c, 'Clearing line carries the txn date');
+        System.assertEquals('Acme Coffee', credit.Ramp_Vendor_Name__c, 'Merchant name carried onto the clearing line');
         System.assert(credit.AcctSeed__GL_Account__c != expenseGL.Id, 'Credit GL should be clearing, not expense');
     }
 
@@ -424,5 +440,72 @@ private class RampJournalEntryBuilderTest {
             System.assert(l.AcctSeed__Date__c == d0 || l.AcctSeed__Date__c == d1,
                 'Line should carry its own txn date: ' + l.AcctSeed__ExtId__c + ' -> ' + l.AcctSeed__Date__c);
         }
+    }
+
+    @IsTest
+    static void build_vendorCoding_resolvesAccountLookup() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-1');
+        Account vendor = createVendorAccount('Atlassian', 'ramp-vendor-uuid-1');
+
+        // Raw descriptor on the merchant — name matching would fail, so this
+        // proves the resolution came from the Accounting Vendor coding.
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-v1', 50.0, 'gl-uuid-1');
+        t.merchant_name = 'ATLASSIAN*SUB 12345';
+        RampJournalEntryBuilder.AccountingFieldSelection v = new RampJournalEntryBuilder.AccountingFieldSelection();
+        v.id = 'ramp-vendor-uuid-1';
+        v.type = 'MERCHANT'; // Ramp's selection type for the Accounting Vendor dimension
+        v.external_id = vendor.Id;
+        t.accounting_field_selections.add(v);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size());
+        AcctSeed__Journal_Entry_Line__c debit = result.successful[0].lines[0];
+        System.assertEquals(vendor.Id, debit.AcctSeed__Account__c,
+            'VENDOR coding selection should resolve the Account lookup');
+        System.assertEquals('ATLASSIAN*SUB 12345', debit.Ramp_Vendor_Name__c);
+    }
+
+    @IsTest
+    static void build_merchantName_matchesExistingVendorsOnly() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-1');
+        Account vendor = createVendorAccount('Atlassian', null);
+
+        // Tracked vendor, no Ramp coding — exact merchant-name fallback hits.
+        RampJournalEntryBuilder.RampTransaction tracked = sampleTransaction('txn-a', 50.0, 'gl-uuid-1');
+        tracked.merchant_name = 'ATLASSIAN'; // case-insensitive match
+        // Untracked T&E merchant — no Account exists, lookup must stay blank.
+        RampJournalEntryBuilder.RampTransaction untracked = sampleTransaction('txn-b', 12.0, 'gl-uuid-1');
+        untracked.merchant_name = 'Chipotle';
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ tracked, untracked },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size(), 'Same day collapses into one JE');
+        Map<String, AcctSeed__Journal_Entry_Line__c> byExtId = new Map<String, AcctSeed__Journal_Entry_Line__c>();
+        for (AcctSeed__Journal_Entry_Line__c l : result.successful[0].lines) {
+            byExtId.put(l.AcctSeed__ExtId__c, l);
+        }
+        System.assertEquals(vendor.Id, byExtId.get('txn-a:dr:0').AcctSeed__Account__c,
+            'Tracked merchant matches the existing vendor Account by name');
+        System.assertEquals(null, byExtId.get('txn-b:dr:0').AcctSeed__Account__c,
+            'Untracked merchant must not match (and must not be created)');
+        System.assertEquals('Chipotle', byExtId.get('txn-b:dr:0').Ramp_Vendor_Name__c,
+            'Merchant name still recorded as text even with no Account match');
+        System.assertEquals(0, [SELECT COUNT() FROM Account WHERE Name = 'Chipotle'],
+            'No Account auto-created for untracked merchants');
     }
 }

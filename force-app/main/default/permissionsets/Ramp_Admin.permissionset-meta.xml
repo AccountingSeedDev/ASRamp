@@ -16,6 +16,11 @@
         <field>Account.Ramp_Vendor_Id__c</field>
         <readable>true</readable>
     </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>AcctSeed__Journal_Entry_Line__c.Ramp_Vendor_Name__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
     <hasActivationRequired>false</hasActivationRequired>
     <label>Ramp Admin</label>
     <license>Salesforce</license>

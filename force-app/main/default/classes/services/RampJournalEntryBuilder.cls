@@ -125,6 +125,15 @@ public with sharing class RampJournalEntryBuilder {
         Map<String, Id> glByUuid = resolveGLs(glUuids);
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid = resolveVariables(varUuids);
 
+        // 1b. Bulk-resolve vendor Accounts for the line-level Account lookup.
+        //     Deterministic first (the transaction's Accounting Vendor coding,
+        //     whose external_id is the SF Account Id we upload in vendor sync),
+        //     then a strict merchant-name match against EXISTING vendor Accounts.
+        //     Never creates Accounts — unmatched merchants (Chipotle et al.)
+        //     simply leave the lookup blank.
+        Map<String, Id> acctByVendorUuid = resolveVendorAccounts(collectVendorSelections(transactions));
+        Map<String, Id> acctByMerchant = resolveMerchantAccounts(transactions);
+
         // 2. Resolve settings once.
         Id clearingGLId = RampSyncSettingsService.getCardClearingGLAccountId();
         Id ledgerId = RampSyncSettingsService.getDefaultLedgerId();
@@ -193,7 +202,8 @@ public with sharing class RampJournalEntryBuilder {
 
             List<AcctSeed__Journal_Entry_Line__c> txnLines;
             try {
-                txnLines = buildTransactionLines(txn, txnDate, glByUuid, varByUuid, clearingGLId, suspenseGLId);
+                txnLines = buildTransactionLines(txn, txnDate, glByUuid, varByUuid,
+                    acctByVendorUuid, acctByMerchant, clearingGLId, suspenseGLId);
             } catch (BuildException e) {
                 result.failed.put(txn.id, e.getMessage());
                 continue;
@@ -264,6 +274,8 @@ public with sharing class RampJournalEntryBuilder {
         Date txnDate,
         Map<String, Id> glByUuid,
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+        Map<String, Id> acctByVendorUuid,
+        Map<String, Id> acctByMerchant,
         Id clearingGLId,
         Id suspenseGLId
     ) {
@@ -282,7 +294,7 @@ public with sharing class RampJournalEntryBuilder {
                 }
                 lines.add(buildDebitLine(
                     txn, txnDate, li.accounting_field_selections, lineAmount, li.memo, i,
-                    glByUuid, varByUuid, suspenseGLId, isRefund
+                    glByUuid, varByUuid, acctByVendorUuid, acctByMerchant, suspenseGLId, isRefund
                 ));
             }
         } else {
@@ -293,7 +305,7 @@ public with sharing class RampJournalEntryBuilder {
             }
             lines.add(buildDebitLine(
                 txn, txnDate, txn.accounting_field_selections, singleAmount, txn.memo, 0,
-                glByUuid, varByUuid, suspenseGLId, isRefund
+                glByUuid, varByUuid, acctByVendorUuid, acctByMerchant, suspenseGLId, isRefund
             ));
         }
 
@@ -304,6 +316,7 @@ public with sharing class RampJournalEntryBuilder {
         clearing.AcctSeed__ExtId__c = txn.id + ':cr';
         clearing.AcctSeed__GL_Account__c = clearingGLId;
         clearing.AcctSeed__Date__c = txnDate; // keep the pair on the txn's own date
+        clearing.Ramp_Vendor_Name__c = txn.merchant_name; // trace the credit side too
         clearing.AcctSeed__Description__c = 'Ramp card clearing';
         if (isRefund) {
             // Refund: clearing is the DEBIT side
@@ -325,6 +338,8 @@ public with sharing class RampJournalEntryBuilder {
         Integer ordinal,
         Map<String, Id> glByUuid,
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+        Map<String, Id> acctByVendorUuid,
+        Map<String, Id> acctByMerchant,
         Id suspenseGLId,
         Boolean isRefund
     ) {
@@ -332,6 +347,22 @@ public with sharing class RampJournalEntryBuilder {
         line.AcctSeed__ExtId__c = txn.id + ':dr:' + ordinal;
         line.AcctSeed__Date__c = txnDate; // the Ramp transaction's own date, not the header's
         line.AcctSeed__Description__c = String.isNotBlank(lineMemo) ? lineMemo : txn.memo;
+        line.Ramp_Vendor_Name__c = txn.merchant_name;
+
+        // Vendor Account (may stay null — never required):
+        //   1. Accounting Vendor coding (line-level, then transaction-level).
+        //      Ramp's accounting field type for the vendor dimension is
+        //      'MERCHANT' (there is no VENDOR value in the selection enum).
+        //   2. strict merchant-name match against existing vendor Accounts
+        String vendorUuid = findSelectionId(lineSelections, 'MERCHANT');
+        if (String.isBlank(vendorUuid)) {
+            vendorUuid = findSelectionId(txn.accounting_field_selections, 'MERCHANT');
+        }
+        Id vendorAcct = String.isNotBlank(vendorUuid) ? acctByVendorUuid.get(vendorUuid) : null;
+        if (vendorAcct == null && String.isNotBlank(txn.merchant_name)) {
+            vendorAcct = acctByMerchant.get(txn.merchant_name.toLowerCase());
+        }
+        line.AcctSeed__Account__c = vendorAcct;
 
         // Resolve GL (line-level first, then transaction-level)
         String glUuid = findSelectionId(lineSelections, 'GL_ACCOUNT');
@@ -456,6 +487,110 @@ public with sharing class RampJournalEntryBuilder {
             result.put(gl.Ramp_Id__c, gl.Id);
         }
         return result;
+    }
+
+    /**
+     * @description Collect Accounting Vendor coding selections (line-level +
+     * txn-level) as selection uuid -> external_id. Ramp types the vendor coding
+     * dimension as 'MERCHANT' on transaction field selections. The external_id
+     * is the SF Account Id we sent when syncing the vendor to Ramp
+     * (see RampVendorSyncBatch).
+     */
+    private static Map<String, String> collectVendorSelections(List<RampTransaction> transactions) {
+        Map<String, String> extByUuid = new Map<String, String>();
+        for (RampTransaction txn : transactions) {
+            addVendorSelections(txn.accounting_field_selections, extByUuid);
+            if (txn.line_items != null) {
+                for (LineItem li : txn.line_items) {
+                    addVendorSelections(li.accounting_field_selections, extByUuid);
+                }
+            }
+        }
+        return extByUuid;
+    }
+
+    private static void addVendorSelections(List<AccountingFieldSelection> selections, Map<String, String> extByUuid) {
+        if (selections == null) return;
+        for (AccountingFieldSelection sel : selections) {
+            if (sel.type == 'MERCHANT' && String.isNotBlank(sel.id)) {
+                extByUuid.put(sel.id, sel.external_id);
+            }
+        }
+    }
+
+    /**
+     * @description Resolve VENDOR selection uuids to Accounts. external_id as
+     * the SF Account Id first (the ERP bridge), then the selection uuid against
+     * Account.Ramp_Vendor_Id__c. Unresolved uuids are simply absent.
+     */
+    private static Map<String, Id> resolveVendorAccounts(Map<String, String> extByUuid) {
+        Map<String, Id> result = new Map<String, Id>();
+        if (extByUuid.isEmpty()) return result;
+
+        // 1. external_id is usually the SF Account Id we uploaded.
+        Map<Id, List<String>> uuidsByAcctId = new Map<Id, List<String>>();
+        for (String uuid : extByUuid.keySet()) {
+            Id candidate = asAccountId(extByUuid.get(uuid));
+            if (candidate != null) {
+                if (!uuidsByAcctId.containsKey(candidate)) uuidsByAcctId.put(candidate, new List<String>());
+                uuidsByAcctId.get(candidate).add(uuid);
+            }
+        }
+        if (!uuidsByAcctId.isEmpty()) {
+            for (Account a : [SELECT Id FROM Account WHERE Id IN :uuidsByAcctId.keySet()]) {
+                for (String uuid : uuidsByAcctId.get(a.Id)) {
+                    result.put(uuid, a.Id);
+                }
+            }
+        }
+
+        // 2. Remaining uuids: the selection uuid is the accounting vendor's
+        //    ramp_id, which vendor sync stamps on Account.Ramp_Vendor_Id__c.
+        Set<String> unresolved = new Set<String>();
+        for (String uuid : extByUuid.keySet()) {
+            if (!result.containsKey(uuid)) unresolved.add(uuid);
+        }
+        if (!unresolved.isEmpty()) {
+            for (Account a : [SELECT Id, Ramp_Vendor_Id__c FROM Account WHERE Ramp_Vendor_Id__c IN :unresolved]) {
+                result.put(a.Ramp_Vendor_Id__c, a.Id);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * @description Strict merchant-name fallback: lowercased merchant name ->
+     * existing vendor-typed Account. Exact name only (SOQL IN is
+     * case-insensitive), oldest Account wins ties, never creates records — so
+     * untracked T&E merchants resolve to nothing by design.
+     */
+    private static Map<String, Id> resolveMerchantAccounts(List<RampTransaction> transactions) {
+        Map<String, Id> result = new Map<String, Id>();
+        Set<String> names = new Set<String>();
+        for (RampTransaction txn : transactions) {
+            if (String.isNotBlank(txn.merchant_name)) names.add(txn.merchant_name);
+        }
+        if (names.isEmpty()) return result;
+        for (Account a : [
+            SELECT Id, Name FROM Account
+            WHERE Name IN :names
+              AND AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
+            ORDER BY CreatedDate ASC
+        ]) {
+            String key = a.Name.toLowerCase();
+            if (!result.containsKey(key)) result.put(key, a.Id);
+        }
+        return result;
+    }
+
+    private static Id asAccountId(String s) {
+        if (String.isBlank(s)) return null;
+        try {
+            Id parsed = (Id) s;
+            return parsed.getSobjectType() == Account.SObjectType ? parsed : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static Map<String, AcctSeed__Accounting_Variable__c> resolveVariables(Set<String> uuids) {

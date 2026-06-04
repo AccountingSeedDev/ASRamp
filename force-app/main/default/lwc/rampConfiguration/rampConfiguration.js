@@ -6,8 +6,6 @@ import clearTokenCache from '@salesforce/apex/RampConfigurationController.clearT
 import saveCredential from '@salesforce/apex/RampConfigurationController.saveCredential';
 import establishAccountingConnection from '@salesforce/apex/RampConfigurationController.establishAccountingConnection';
 import hasAccountingConnection from '@salesforce/apex/RampConfigurationController.hasAccountingConnection';
-import syncGLAccounts from '@salesforce/apex/RampConfigurationController.syncGLAccounts';
-import getGLAccountStats from '@salesforce/apex/RampConfigurationController.getGLAccountStats';
 import createAccountingFields from '@salesforce/apex/RampConfigurationController.createAccountingFields';
 import syncAccountingVariables from '@salesforce/apex/RampConfigurationController.syncAccountingVariables';
 import getRampCustomFields from '@salesforce/apex/RampConfigurationController.getRampCustomFields';
@@ -32,7 +30,6 @@ export default class RampConfiguration extends LightningElement {
     @track isLoading = false;
     @track hasExistingCredential = false;
     @track accountingConnectionStatus = false;
-    @track glAccountStats = { total: 0, synced: 0, not_synced: 0 };
     @track customFields = [];
     @track customFieldsLoading = false;
     @track draftValues = [];
@@ -79,8 +76,6 @@ export default class RampConfiguration extends LightningElement {
 
             // Check accounting connection status
             this.checkAccountingConnection();
-            // Load GL Account stats
-            this.loadGLAccountStats();
         } else if (error) {
             console.error('Error loading credential:', error);
         }
@@ -141,16 +136,6 @@ export default class RampConfiguration extends LightningElement {
         this.loadTransactionStats();
     }
 
-    loadGLAccountStats() {
-        getGLAccountStats()
-            .then(result => {
-                this.glAccountStats = result;
-            })
-            .catch(error => {
-                console.error('Error loading GL Account stats:', error);
-            });
-    }
-
     handleInputChange(event) {
         const field = event.target.dataset.field;
         const value = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
@@ -191,22 +176,6 @@ export default class RampConfiguration extends LightningElement {
             .then(result => {
                 this.showToast('Success', result, 'success');
                 this.accountingConnectionStatus = true;
-            })
-            .catch(error => {
-                this.showToast('Error', this.getErrorMessage(error), 'error');
-            })
-            .finally(() => {
-                this.isLoading = false;
-            });
-    }
-
-    handleSyncGLAccounts() {
-        this.isLoading = true;
-        syncGLAccounts()
-            .then(result => {
-                this.showToast('Success', result, 'success');
-                // Refresh stats after sync
-                this.loadGLAccountStats();
             })
             .catch(error => {
                 this.showToast('Error', this.getErrorMessage(error), 'error');
@@ -409,15 +378,4 @@ export default class RampConfiguration extends LightningElement {
             : 'Not connected - Click "Establish Accounting Connection" after testing credentials';
     }
 
-    get glAccountSyncMessage() {
-        const total = this.glAccountStats.total || 0;
-        const synced = this.glAccountStats.synced || 0;
-        const notSynced = this.glAccountStats.not_synced || 0;
-
-        return `${synced} of ${total} GL Accounts synced to Ramp (${notSynced} pending)`;
-    }
-
-    get hasPendingGLAccounts() {
-        return (this.glAccountStats.not_synced || 0) > 0;
-    }
 }
