@@ -8,8 +8,10 @@
  *   Cr  Ramp Card Clearing       $X   (one clearing line, GL from the ledger's Ramp defaults)
  *
  * Transactions are grouped into JE headers per Ramp_Sync_Settings__mdt.Sync_Grouping__c:
- *   Daily  -> one JE per accounting date, per entity, per currency
- *   By Run -> one JE per accounting period, per sync run, per entity, per currency
+ *   Daily             -> one JE per accounting date, per entity, per currency
+ *   Accounting Period -> one JE per accounting period, per entity, per currency
+ * The header's AcctSeed__ExtId__c IS the bucket key, so any later run upserts
+ * into the same Daily/Period JE instead of creating a new one.
  * Lines stay keyed by Ramp txn id (idempotent); only the header they attach to changes.
  *
  * For refunds (transaction.amount < 0), sides are flipped on the same two-line shape.
@@ -105,17 +107,15 @@ public with sharing class RampJournalEntryBuilder {
     // --------------------------------------------------------------------
 
     /**
-     * @param grouping RampSyncSettingsService.GROUPING_DAILY or GROUPING_BY_RUN —
+     * @param grouping RampSyncSettingsService.GROUPING_DAILY or GROUPING_BY_PERIOD —
      *        controls how transactions collapse into JE headers.
-     * @param runId    Stable id for the current sync run; only used by By Run
-     *        grouping so all pages of one run land in the same per-period JE.
      */
-    public static BuildResult build(List<RampTransaction> transactions, String grouping, String runId) {
+    public static BuildResult build(List<RampTransaction> transactions, String grouping) {
         BuildResult result = new BuildResult();
         if (transactions == null || transactions.isEmpty()) {
             return result;
         }
-        Boolean byRun = (grouping == RampSyncSettingsService.GROUPING_BY_RUN);
+        Boolean byPeriod = (grouping == RampSyncSettingsService.GROUPING_BY_PERIOD);
 
         // 1. Bulk-resolve all referenced GL and Variable option UUIDs to SF Ids.
         Set<String> glUuids = new Set<String>();
@@ -135,6 +135,7 @@ public with sharing class RampJournalEntryBuilder {
         // period and that period is open; we look the period up by date.
         Map<Date, Id> periodByDate = new Map<Date, Id>();
         Map<Id, String> periodNameById = new Map<Id, String>();
+        Map<Id, Date> periodEndById = new Map<Id, Date>();
         Set<Date> allDates = new Set<Date>();
         for (RampTransaction txn : transactions) {
             Date d = parseDate(txn.accounting_date != null ? txn.accounting_date : txn.user_transaction_time);
@@ -153,6 +154,7 @@ public with sharing class RampJournalEntryBuilder {
                 WHERE AcctSeed__Start_Date__c <= :maxDate AND AcctSeed__End_Date__c >= :minDate
             ]) {
                 periodNameById.put(p.Id, p.Name);
+                periodEndById.put(p.Id, p.AcctSeed__End_Date__c);
                 for (Date d : allDates) {
                     if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) {
                         periodByDate.put(d, p.Id);
@@ -162,9 +164,10 @@ public with sharing class RampJournalEntryBuilder {
         }
 
         // 4. Build each transaction's lines and fold them into a JE bucket.
-        //    Bucket key decides which header the lines attach to:
-        //      Daily  -> date + entity + currency
-        //      By Run -> runId + period + entity + currency
+        //    Bucket key decides which header the lines attach to (and doubles as
+        //    the header's AcctSeed__ExtId__c, so re-runs upsert the same JE):
+        //      Daily             -> date + entity + currency
+        //      Accounting Period -> period + entity + currency
         //    A JE must sit in one Accounting Period, so the key always pins a period.
         Map<String, JournalEntryBuild> bucketsByKey = new Map<String, JournalEntryBuild>();
         Map<String, Date> headerDateByKey = new Map<String, Date>();   // representative (max) date
@@ -190,7 +193,7 @@ public with sharing class RampJournalEntryBuilder {
 
             List<AcctSeed__Journal_Entry_Line__c> txnLines;
             try {
-                txnLines = buildTransactionLines(txn, glByUuid, varByUuid, clearingGLId, suspenseGLId);
+                txnLines = buildTransactionLines(txn, txnDate, glByUuid, varByUuid, clearingGLId, suspenseGLId);
             } catch (BuildException e) {
                 result.failed.put(txn.id, e.getMessage());
                 continue;
@@ -198,8 +201,8 @@ public with sharing class RampJournalEntryBuilder {
 
             String entity = String.isBlank(txn.entity_id) ? null : txn.entity_id;
             String currencyCode = String.isBlank(txn.currency_code) ? 'X' : txn.currency_code;
-            String key = byRun
-                ? 'R:' + runId + ':' + periodId + ':' + (entity == null ? 'X' : entity) + ':' + currencyCode
+            String key = byPeriod
+                ? 'P:' + periodId + ':' + (entity == null ? 'X' : entity) + ':' + currencyCode
                 : 'D:' + String.valueOf(txnDate) + ':' + (entity == null ? 'X' : entity) + ':' + currencyCode;
 
             JournalEntryBuild jeb = bucketsByKey.get(key);
@@ -222,24 +225,26 @@ public with sharing class RampJournalEntryBuilder {
         // 5. Finalize one header per bucket.
         for (String key : bucketsByKey.keySet()) {
             JournalEntryBuild jeb = bucketsByKey.get(key);
-            Date headerDate = headerDateByKey.get(key);
+            Id periodId = periodByKey.get(key);
+            // Daily: the bucket date. Period: the period's end date — deterministic,
+            // so re-runs upserting into the same period JE never shift it.
+            Date headerDate = byPeriod ? periodEndById.get(periodId) : headerDateByKey.get(key);
 
-            String dateStr = String.valueOf(headerDate); // yyyy-MM-dd
             AcctSeed__Journal_Entry__c je = new AcctSeed__Journal_Entry__c();
             je.AcctSeed__ExtId__c = key;
             je.AcctSeed__Journal_Date__c = headerDate;
-            je.AcctSeed__Accounting_Period__c = periodByKey.get(key);
+            je.AcctSeed__Accounting_Period__c = periodId;
             je.Ramp_Entity_Id__c = entityByKey.get(key);
             // AcctSeed__Type__c is a restricted picklist (Bank Transfer, EOM Adjustment,
             // Intercompany, Sub-ledger Adjustment) — none fit card spend, so leave null.
             je.AcctSeed__Status__c = defaultStatus;
             je.AcctSeed__Ledger__c = ledgerId;
-            // Name convention:
-            //   Daily  -> "RAMP - {yyyy-mm-dd}"
-            //   By Run -> "RAMP Sync - {yyyy-mm-dd} - {periodName}"
-            je.Name = byRun
-                ? 'RAMP Sync - ' + dateStr + ' - ' + periodNameById.get(periodByKey.get(key))
-                : 'RAMP - ' + dateStr;
+            // Name convention (stable per bucket, like the ExtId):
+            //   Daily             -> "RAMP - {yyyy-mm-dd}" (the bucket date)
+            //   Accounting Period -> "RAMP - {periodName}"
+            je.Name = byPeriod
+                ? 'RAMP - ' + periodNameById.get(periodId)
+                : 'RAMP - ' + String.valueOf(headerDate);
             je.Ramp_Sync_Status__c = 'Pending';
             jeb.header = je;
             result.successful.add(jeb);
@@ -256,6 +261,7 @@ public with sharing class RampJournalEntryBuilder {
 
     private static List<AcctSeed__Journal_Entry_Line__c> buildTransactionLines(
         RampTransaction txn,
+        Date txnDate,
         Map<String, Id> glByUuid,
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
         Id clearingGLId,
@@ -275,7 +281,7 @@ public with sharing class RampJournalEntryBuilder {
                     throw new BuildException('Line item ' + i + ' has no amount');
                 }
                 lines.add(buildDebitLine(
-                    txn, li.accounting_field_selections, lineAmount, li.memo, i,
+                    txn, txnDate, li.accounting_field_selections, lineAmount, li.memo, i,
                     glByUuid, varByUuid, suspenseGLId, isRefund
                 ));
             }
@@ -286,7 +292,7 @@ public with sharing class RampJournalEntryBuilder {
                 throw new BuildException('Transaction has no amount and no line items');
             }
             lines.add(buildDebitLine(
-                txn, txn.accounting_field_selections, singleAmount, txn.memo, 0,
+                txn, txnDate, txn.accounting_field_selections, singleAmount, txn.memo, 0,
                 glByUuid, varByUuid, suspenseGLId, isRefund
             ));
         }
@@ -297,6 +303,7 @@ public with sharing class RampJournalEntryBuilder {
         AcctSeed__Journal_Entry_Line__c clearing = new AcctSeed__Journal_Entry_Line__c();
         clearing.AcctSeed__ExtId__c = txn.id + ':cr';
         clearing.AcctSeed__GL_Account__c = clearingGLId;
+        clearing.AcctSeed__Date__c = txnDate; // keep the pair on the txn's own date
         clearing.AcctSeed__Description__c = 'Ramp card clearing';
         if (isRefund) {
             // Refund: clearing is the DEBIT side
@@ -311,6 +318,7 @@ public with sharing class RampJournalEntryBuilder {
 
     private static AcctSeed__Journal_Entry_Line__c buildDebitLine(
         RampTransaction txn,
+        Date txnDate,
         List<AccountingFieldSelection> lineSelections,
         Decimal amount,
         String lineMemo,
@@ -322,6 +330,7 @@ public with sharing class RampJournalEntryBuilder {
     ) {
         AcctSeed__Journal_Entry_Line__c line = new AcctSeed__Journal_Entry_Line__c();
         line.AcctSeed__ExtId__c = txn.id + ':dr:' + ordinal;
+        line.AcctSeed__Date__c = txnDate; // the Ramp transaction's own date, not the header's
         line.AcctSeed__Description__c = String.isNotBlank(lineMemo) ? lineMemo : txn.memo;
 
         // Resolve GL (line-level first, then transaction-level)

@@ -14,7 +14,6 @@
 public class RampTransactionSyncQueueable implements Queueable, Database.AllowsCallouts {
 
     private final String startCursor;
-    private final String runId;
     private final Id ajrId;
     private final Integer cumProcessed;
     private final Integer cumSucceeded;
@@ -22,17 +21,16 @@ public class RampTransactionSyncQueueable implements Queueable, Database.AllowsC
     private final String cumNotes;
 
     public RampTransactionSyncQueueable() {
-        this(null, RampTransactionService.newRunId());
+        this(null);
     }
 
-    public RampTransactionSyncQueueable(String startCursor, String runId) {
-        this(startCursor, runId, null, 0, 0, 0, null);
+    public RampTransactionSyncQueueable(String startCursor) {
+        this(startCursor, null, 0, 0, 0, null);
     }
 
-    private RampTransactionSyncQueueable(String startCursor, String runId, Id ajrId,
+    private RampTransactionSyncQueueable(String startCursor, Id ajrId,
             Integer cumProcessed, Integer cumSucceeded, Integer cumFailed, String cumNotes) {
         this.startCursor = startCursor;
-        this.runId = runId;
         this.ajrId = ajrId;
         this.cumProcessed = cumProcessed;
         this.cumSucceeded = cumSucceeded;
@@ -43,7 +41,7 @@ public class RampTransactionSyncQueueable implements Queueable, Database.AllowsC
     public void execute(QueueableContext ctx) {
         RampTransactionService.PageResult result;
         try {
-            result = RampTransactionService.syncPage(startCursor, runId);
+            result = RampTransactionService.syncPage(startCursor);
         } catch (Exception e) {
             System.debug(LoggingLevel.ERROR,
                 'RampTransactionSyncQueueable page failed at cursor=' + startCursor + ': ' + e.getMessage()
@@ -74,7 +72,7 @@ public class RampTransactionSyncQueueable implements Queueable, Database.AllowsC
         // Chain when there's more to drain. Don't chain inside a test — the
         // platform won't fire chained Queueables under Test.startTest/stopTest.
         if (String.isNotBlank(result.nextCursor) && !Test.isRunningTest()) {
-            System.enqueueJob(new RampTransactionSyncQueueable(result.nextCursor, runId, currentAjrId, p, s, f, notes));
+            System.enqueueJob(new RampTransactionSyncQueueable(result.nextCursor, currentAjrId, p, s, f, notes));
         }
     }
 }

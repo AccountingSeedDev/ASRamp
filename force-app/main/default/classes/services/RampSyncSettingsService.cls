@@ -24,7 +24,7 @@ public with sharing class RampSyncSettingsService {
 
     // Sync_Grouping__c picklist values — how transactions collapse into JEs.
     public static final String GROUPING_DAILY = 'Daily';
-    public static final String GROUPING_BY_RUN = 'By Run';
+    public static final String GROUPING_BY_PERIOD = 'Accounting Period';
 
     @TestVisible
     private static Ramp_Sync_Settings__mdt overrideSettings;
@@ -188,7 +188,12 @@ public with sharing class RampSyncSettingsService {
      */
     public static String getSyncGrouping() {
         String value = getSettings().Sync_Grouping__c;
-        return value == GROUPING_BY_RUN ? GROUPING_BY_RUN : GROUPING_DAILY;
+        // Legacy 'By Run' (pre-0.4 picklist value) already produced one JE per
+        // accounting period; map any lingering subscriber value to the period bucket.
+        if (value == GROUPING_BY_PERIOD || value == 'By Run') {
+            return GROUPING_BY_PERIOD;
+        }
+        return GROUPING_DAILY;
     }
 
     /**

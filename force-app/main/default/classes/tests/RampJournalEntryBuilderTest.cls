@@ -137,7 +137,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ t },
-            RampSyncSettingsService.GROUPING_DAILY, 'test-run'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -161,12 +161,14 @@ private class RampJournalEntryBuilderTest {
         System.assertEquals(expenseGL.Id, debit.AcctSeed__GL_Account__c);
         System.assertEquals(50.0, debit.AcctSeed__Debit__c);
         System.assertEquals(null, debit.AcctSeed__Credit__c);
+        System.assertEquals(pickPeriodDate(), debit.AcctSeed__Date__c, 'Debit line carries the txn date');
 
         // Credit (clearing) line
         AcctSeed__Journal_Entry_Line__c credit = tb.lines[1];
         System.assertEquals('txn-1:cr', credit.AcctSeed__ExtId__c);
         System.assertEquals(50.0, credit.AcctSeed__Credit__c);
         System.assertEquals(null, credit.AcctSeed__Debit__c);
+        System.assertEquals(pickPeriodDate(), credit.AcctSeed__Date__c, 'Clearing line carries the txn date');
         System.assert(credit.AcctSeed__GL_Account__c != expenseGL.Id, 'Credit GL should be clearing, not expense');
     }
 
@@ -197,7 +199,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ t },
-            RampSyncSettingsService.GROUPING_DAILY, 'test-run'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -223,7 +225,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ t },
-            RampSyncSettingsService.GROUPING_DAILY, 'test-run'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -265,7 +267,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ t },
-            RampSyncSettingsService.GROUPING_DAILY, 'test-run'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -285,7 +287,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ t },
-            RampSyncSettingsService.GROUPING_DAILY, 'test-run'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -325,7 +327,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ t },
-            RampSyncSettingsService.GROUPING_DAILY, 'test-run'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -350,7 +352,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ a, b },
-            RampSyncSettingsService.GROUPING_DAILY, 'run-1'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -375,7 +377,7 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ a, b },
-            RampSyncSettingsService.GROUPING_DAILY, 'run-1'
+            RampSyncSettingsService.GROUPING_DAILY
         );
         Test.stopTest();
 
@@ -383,7 +385,7 @@ private class RampJournalEntryBuilderTest {
     }
 
     @IsTest
-    static void build_byRun_samePeriodCollapsesAcrossDays() {
+    static void build_byPeriod_samePeriodCollapsesAcrossDays() {
         TestDataFactory.getInstance();
         configureSettings('CardClearing-TEST', 'Ledger-TEST');
         createCodedGL('ExpenseGL', 'gl-uuid-1');
@@ -396,18 +398,31 @@ private class RampJournalEntryBuilderTest {
         Test.startTest();
         RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
             new List<RampJournalEntryBuilder.RampTransaction>{ a, b },
-            RampSyncSettingsService.GROUPING_BY_RUN, 'run-1'
+            RampSyncSettingsService.GROUPING_BY_PERIOD
         );
         Test.stopTest();
 
-        System.assertEquals(1, result.successful.size(), 'By Run: same period collapses across days');
+        System.assertEquals(1, result.successful.size(), 'By Period: same period collapses across days');
         RampJournalEntryBuilder.JournalEntryBuild jeb = result.successful[0];
         System.assertEquals(2, jeb.rampTransactionIds.size());
-        System.assert(jeb.header.AcctSeed__ExtId__c.startsWith('R:run-1:'),
-            'By Run header keyed by run+period: ' + jeb.header.AcctSeed__ExtId__c);
-        // Header date is the latest transaction date in the period bucket.
-        System.assertEquals(d1, jeb.header.AcctSeed__Journal_Date__c);
-        System.assert(jeb.header.Name.startsWith('RAMP Sync - ' + String.valueOf(d1) + ' - '),
-            'By Run JE name convention: ' + jeb.header.Name);
+
+        AcctSeed__Accounting_Period__c period = [
+            SELECT Id, Name, AcctSeed__End_Date__c
+            FROM AcctSeed__Accounting_Period__c
+            WHERE AcctSeed__Start_Date__c <= :d0 AND AcctSeed__End_Date__c >= :d1
+            LIMIT 1
+        ];
+        // Key has no run component — re-runs upsert the same period JE.
+        System.assertEquals('P:' + period.Id + ':entity-uuid-sample:USD', jeb.header.AcctSeed__ExtId__c,
+            'By Period header keyed by period+entity+currency');
+        // Header date is the period end date — stable across re-runs.
+        System.assertEquals(period.AcctSeed__End_Date__c, jeb.header.AcctSeed__Journal_Date__c);
+        System.assertEquals('RAMP - ' + period.Name, jeb.header.Name,
+            'By Period JE name convention: ' + jeb.header.Name);
+        // Lines keep each transaction's own date even though they share one header.
+        for (AcctSeed__Journal_Entry_Line__c l : jeb.lines) {
+            System.assert(l.AcctSeed__Date__c == d0 || l.AcctSeed__Date__c == d1,
+                'Line should carry its own txn date: ' + l.AcctSeed__ExtId__c + ' -> ' + l.AcctSeed__Date__c);
+        }
     }
 }

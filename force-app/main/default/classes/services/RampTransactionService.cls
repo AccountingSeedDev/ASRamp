@@ -9,10 +9,9 @@
  * Queueable chain reads that value to decide whether to enqueue itself again.
  *
  * Grouping (Ramp_Sync_Settings__mdt.Sync_Grouping__c) collapses many
- * transactions into fewer JE headers. Lines stay keyed by Ramp txn id, so a
- * given transaction always maps to the same line ExtIds — re-running upserts
- * cleanly and, for By Run grouping, later pages of the same run fold into the
- * header that earlier pages created.
+ * transactions into fewer JE headers. Headers are keyed (AcctSeed__ExtId__c)
+ * by date or accounting period, and lines stay keyed by Ramp txn id — so any
+ * page of any run upserts into the same Daily/Period JE and re-runs are clean.
  */
 public with sharing class RampTransactionService {
 
@@ -30,27 +29,19 @@ public with sharing class RampTransactionService {
     }
 
     /**
-     * @description A stable id for one sync run. By Run grouping uses it so all
-     * pages of a run land in the same per-period JE.
+     * @description A fresh UUID. Not used for grouping — kept as a uniqueness
+     * helper (e.g. RampHomeController scheduled-job names).
      */
     public static String newRunId() {
         return generateUuid();
     }
 
     /**
-     * @description Convenience overload — starts a fresh run.
-     */
-    public static PageResult syncPage(String startCursor) {
-        return syncPage(startCursor, newRunId());
-    }
-
-    /**
      * @description Fetch one page, build grouped JEs, DML, POST sync ack.
      * Idempotent — safe to retry the same cursor on transient failure.
      * @param startCursor null for page 1; otherwise the previous response's `page.next`.
-     * @param runId       stable id for the current run (see {@link #newRunId}).
      */
-    public static PageResult syncPage(String startCursor, String runId) {
+    public static PageResult syncPage(String startCursor) {
         PageResult result = new PageResult();
 
         // 1. Fetch one page of SYNC_READY transactions.
@@ -68,7 +59,7 @@ public with sharing class RampTransactionService {
 
         // 2. Build grouped JE(s) + lines.
         String grouping = RampSyncSettingsService.getSyncGrouping();
-        RampJournalEntryBuilder.BuildResult build = RampJournalEntryBuilder.build(transactions, grouping, runId);
+        RampJournalEntryBuilder.BuildResult build = RampJournalEntryBuilder.build(transactions, grouping);
 
         // 3. Upsert one header per group via AcctSeed__ExtId__c (the group key).
         List<AcctSeed__Journal_Entry__c> headers = new List<AcctSeed__Journal_Entry__c>();
