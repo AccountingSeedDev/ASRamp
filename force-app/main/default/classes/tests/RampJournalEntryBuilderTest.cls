@@ -256,6 +256,73 @@ private class RampJournalEntryBuilderTest {
     }
 
     @IsTest
+    static void build_fxLineItem_usesConvertedAmountNotOriginalCurrency() {
+        // FX transactions carry the merchant's original currency in line `amount`
+        // (e.g. GBP 8000 cents) and the USD settlement in `converted_amount`.
+        // Booking must use the converted (USD) value.
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-2');
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-fx', 111.42, 'gl-uuid-2');
+        RampJournalEntryBuilder.LineItem li = new RampJournalEntryBuilder.LineItem();
+        li.amount = new RampJournalEntryBuilder.CurrencyAmount();
+        li.amount.amount = 8000; // £80.00 original currency
+        li.amount.currency_code = 'GBP';
+        li.amount.minor_unit_conversion_rate = 100;
+        li.converted_amount = new RampJournalEntryBuilder.CurrencyAmount();
+        li.converted_amount.amount = 11142; // $111.42 settled
+        li.converted_amount.currency_code = 'USD';
+        li.converted_amount.minor_unit_conversion_rate = 100;
+        t.line_items = new List<RampJournalEntryBuilder.LineItem>{ li };
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size());
+        RampJournalEntryBuilder.JournalEntryBuild tb = result.successful[0];
+        System.assertEquals(111.42, tb.lines[0].AcctSeed__Debit__c, 'Debit must be the USD converted amount');
+        System.assertEquals(111.42, tb.lines[1].AcctSeed__Credit__c, 'Clearing must balance in USD');
+    }
+
+    @IsTest
+    static void build_refundWithLineItems_producesPositiveFlippedLines() {
+        // Mirrors the production failure: a refund whose line_items carry
+        // negative cents must still produce positive line values (sides flip).
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-3');
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-refund-split', -2384.20, 'gl-uuid-3');
+        RampJournalEntryBuilder.LineItem li = new RampJournalEntryBuilder.LineItem();
+        li.amount = new RampJournalEntryBuilder.CurrencyAmount();
+        li.amount.amount = -238420; // negative cents, as Ramp sends for refunds
+        li.amount.currency_code = 'USD';
+        li.amount.minor_unit_conversion_rate = 100;
+        t.line_items = new List<RampJournalEntryBuilder.LineItem>{ li };
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size(), 'Refund with splits should build, not fail');
+        RampJournalEntryBuilder.JournalEntryBuild tb = result.successful[0];
+        // Expense line: positive CREDIT
+        System.assertEquals(2384.20, tb.lines[0].AcctSeed__Credit__c);
+        System.assertEquals(null, tb.lines[0].AcctSeed__Debit__c);
+        // Clearing line: positive DEBIT
+        System.assertEquals(2384.20, tb.lines[1].AcctSeed__Debit__c);
+        System.assertEquals(null, tb.lines[1].AcctSeed__Credit__c);
+    }
+
+    @IsTest
     static void build_resolvesAccountingVariables() {
         TestDataFactory.getInstance();
         configureSettings('CardClearing-TEST', 'Ledger-TEST');

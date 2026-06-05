@@ -39,14 +39,17 @@ public with sharing class RampTransactionService {
     /**
      * @description Fetch one page, build grouped JEs, DML, POST sync ack.
      * Idempotent — safe to retry the same cursor on transient failure.
-     * @param startCursor null for page 1; otherwise the previous response's `page.next`.
+     * @param startCursor null for page 1; otherwise the previous PageResult's nextCursor.
      */
     public static PageResult syncPage(String startCursor) {
         PageResult result = new PageResult();
 
         // 1. Fetch one page of SYNC_READY transactions.
         TransactionPageResponse page = fetchPage(startCursor);
-        result.nextCursor = page.page != null ? page.page.next : null;
+        // page.next is a full URL — keep only its `start` token (same handling
+        // as RampBillService / RampReimbursementService; passing the raw URL
+        // back as `start` makes Ramp reject page 2 and kills the chain).
+        result.nextCursor = page.page != null ? extractStartCursor(page.page.next) : null;
 
         List<RampJournalEntryBuilder.RampTransaction> transactions = page.data != null
             ? page.data
@@ -273,6 +276,18 @@ public with sharing class RampTransactionService {
     // --------------------------------------------------------------------
     //  Helpers
     // --------------------------------------------------------------------
+
+    /** @description Pull the `start` token out of Ramp's full next-page URL. */
+    @TestVisible
+    private static String extractStartCursor(String nextUrl) {
+        if (String.isBlank(nextUrl)) return null;
+        Integer i = nextUrl.indexOf('start=');
+        if (i < 0) return null;
+        String cursor = nextUrl.substring(i + 6);
+        Integer amp = cursor.indexOf('&');
+        if (amp >= 0) cursor = cursor.substring(0, amp);
+        return EncodingUtil.urlDecode(cursor, 'UTF-8');
+    }
 
     private static String formatDmlErrors(List<Database.Error> errors) {
         if (errors == null || errors.isEmpty()) return 'Unknown DML error';

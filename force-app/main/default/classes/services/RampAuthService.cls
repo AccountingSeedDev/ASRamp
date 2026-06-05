@@ -14,6 +14,11 @@ public with sharing class RampAuthService {
     @TestVisible
     private static Ramp_Credential__mdt overrideCredential;
 
+    // Test seam for the active-credential SOQL itself — lets tests exercise the
+    // zero-active and multiple-active guard branches (CMDT can't be inserted in tests).
+    @TestVisible
+    private static List<Ramp_Credential__mdt> overrideCredentialQuery;
+
     @TestVisible
     private static Ramp_Credential__mdt buildTestCredential() {
         return new Ramp_Credential__mdt(
@@ -37,16 +42,28 @@ public with sharing class RampAuthService {
         if (overrideCredential != null) {
             return overrideCredential;
         }
-        List<Ramp_Credential__mdt> credentials = [
-            SELECT Label, Client_ID__c, Client_Secret__c, Token_URL__c,
-                   API_Base_URL__c, Scopes__c, Is_Active__c, DeveloperName
-            FROM Ramp_Credential__mdt
-            WHERE Is_Active__c = true
-            LIMIT 1
-        ];
+        List<Ramp_Credential__mdt> credentials = overrideCredentialQuery != null
+            ? overrideCredentialQuery
+            : [
+                SELECT Label, Client_ID__c, Client_Secret__c, Token_URL__c,
+                       API_Base_URL__c, Scopes__c, Is_Active__c, DeveloperName
+                FROM Ramp_Credential__mdt
+                WHERE Is_Active__c = true
+                LIMIT 2
+            ];
 
         if (credentials.isEmpty()) {
             throw new RampAuthException('No active Ramp credential found');
+        }
+        // Fail loud rather than pick one at random: two active rows means every
+        // callout could target the wrong Ramp business (e.g. a stray packaged
+        // or demo record left active alongside the org's real credential).
+        if (credentials.size() > 1) {
+            throw new RampAuthException(
+                'Multiple active Ramp credentials found. Exactly one Ramp Credential record ' +
+                'may have "Is Active" checked — deactivate the extra record ' +
+                '(commonly a leftover packaged or demo credential).'
+            );
         }
 
         return credentials[0];
@@ -58,7 +75,7 @@ public with sharing class RampAuthService {
      */
     public static String getAccessToken() {
         Ramp_Credential__mdt credential = getActiveCredential();
-        String cacheKey = 'token' + credential.DeveloperName;
+        String cacheKey = cacheKeyFor(credential);
 
         // Try to get from cache first
         Cache.OrgPartition orgPartition = Cache.Org.getPartition(CACHE_PARTITION);
@@ -142,12 +159,22 @@ public with sharing class RampAuthService {
      */
     public static void clearCachedToken() {
         Ramp_Credential__mdt credential = getActiveCredential();
-        String cacheKey = 'token' + credential.DeveloperName;
 
         Cache.OrgPartition orgPartition = Cache.Org.getPartition(CACHE_PARTITION);
         if (orgPartition != null) {
-            orgPartition.remove(cacheKey);
+            orgPartition.remove(cacheKeyFor(credential));
         }
+    }
+
+    /**
+     * @description Cache key for a credential's token. Keyed on the client id
+     * (not the record name) so editing a credential record's values can never
+     * serve a still-valid token that was minted for a different Ramp business.
+     */
+    @TestVisible
+    private static String cacheKeyFor(Ramp_Credential__mdt credential) {
+        String clientId = credential.Client_ID__c == null ? '' : credential.Client_ID__c;
+        return 'token' + String.valueOf(Math.abs(clientId.hashCode()));
     }
 
     /**

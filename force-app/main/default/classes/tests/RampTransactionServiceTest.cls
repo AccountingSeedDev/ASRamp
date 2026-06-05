@@ -263,7 +263,10 @@ private class RampTransactionServiceTest {
         protected override HttpResponse respondToApi(HttpRequest req, HttpResponse res) {
             if (req.getEndpoint().contains('/transactions')) {
                 res.setStatusCode(200);
-                res.setBody(buildTransactionsResponse(glUuid, 'ramp-txn-page1', 'cursor-page-2'));
+                // Real shape: page.next is a FULL URL, not a bare token — the
+                // service must extract the `start` param to chain correctly.
+                res.setBody(buildTransactionsResponse(glUuid, 'ramp-txn-page1',
+                    'https://api.ramp.com/developer/v1/transactions?sync_status=SYNC_READY&page_size=100&start=cursor-page-2'));
             } else {
                 res.setStatusCode(201);
                 res.setBody('{"id":"sync-resource-uuid"}');

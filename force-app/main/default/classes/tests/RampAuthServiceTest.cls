@@ -40,6 +40,51 @@ private class RampAuthServiceTest {
     }
 
     @IsTest
+    static void testGetActiveCredential_MultipleActiveThrows() {
+        RampAuthService.overrideCredentialQuery = new List<Ramp_Credential__mdt>{
+            RampAuthService.buildTestCredential(),
+            RampAuthService.buildTestCredential()
+        };
+        Test.startTest();
+        try {
+            RampAuthService.getActiveCredential();
+            System.assert(false, 'Expected RampAuthException for multiple active credentials');
+        } catch (RampAuthService.RampAuthException e) {
+            System.assert(e.getMessage().contains('Multiple active Ramp credentials'),
+                'Expected multiple-active error, got: ' + e.getMessage());
+        }
+        Test.stopTest();
+    }
+
+    @IsTest
+    static void testGetActiveCredential_EmptyQueryThrows() {
+        RampAuthService.overrideCredentialQuery = new List<Ramp_Credential__mdt>();
+        Test.startTest();
+        try {
+            RampAuthService.getActiveCredential();
+            System.assert(false, 'Expected RampAuthException when no active credential');
+        } catch (RampAuthService.RampAuthException e) {
+            System.assert(e.getMessage().contains('No active Ramp credential found'));
+        }
+        Test.stopTest();
+    }
+
+    @IsTest
+    static void testCacheKey_KeyedOnClientIdNotRecordName() {
+        Ramp_Credential__mdt a = RampAuthService.buildTestCredential();
+        Ramp_Credential__mdt b = RampAuthService.buildTestCredential();
+        b.Client_ID__c = 'a_different_business_client_id';
+        // Same DeveloperName, different client ids -> different cache keys, so a
+        // credential swap can never serve a token minted for another business.
+        System.assertNotEquals(RampAuthService.cacheKeyFor(a), RampAuthService.cacheKeyFor(b),
+            'Cache key must change when the client id changes');
+        System.assertEquals(RampAuthService.cacheKeyFor(a), RampAuthService.cacheKeyFor(a),
+            'Cache key must be stable for the same client id');
+        System.assert(RampAuthService.cacheKeyFor(a).isAlphanumeric(),
+            'Platform cache keys must be alphanumeric');
+    }
+
+    @IsTest
     static void testRequestAccessToken_Success() {
         // Create a mock credential
         Ramp_Credential__mdt mockCredential = new Ramp_Credential__mdt(

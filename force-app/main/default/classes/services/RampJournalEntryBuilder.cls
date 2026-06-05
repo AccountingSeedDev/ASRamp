@@ -288,10 +288,21 @@ public with sharing class RampJournalEntryBuilder {
             // Multi-line splits — one debit per line_item
             for (Integer i = 0; i < txn.line_items.size(); i++) {
                 LineItem li = txn.line_items[i];
-                Decimal lineAmount = (li.amount != null) ? li.amount.toDecimal() : null;
+                // Prefer converted_amount (settlement currency, matches the
+                // top-level USD amount). line `amount` is the merchant's
+                // ORIGINAL currency on FX transactions and would book e.g.
+                // £80 as $80.
+                CurrencyAmount money = (li.converted_amount != null && li.converted_amount.amount != null)
+                    ? li.converted_amount
+                    : li.amount;
+                Decimal lineAmount = (money != null && money.amount != null) ? money.toDecimal() : null;
                 if (lineAmount == null) {
                     throw new BuildException('Line item ' + i + ' has no amount');
                 }
+                // Refund line items carry negative amounts; sides are already
+                // flipped via isRefund, so the line value itself must be positive
+                // (mirrors the .abs() on the no-splits path below).
+                lineAmount = lineAmount.abs();
                 lines.add(buildDebitLine(
                     txn, txnDate, li.accounting_field_selections, lineAmount, li.memo, i,
                     glByUuid, varByUuid, acctByVendorUuid, acctByMerchant, suspenseGLId, isRefund
