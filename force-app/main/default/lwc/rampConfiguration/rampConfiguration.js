@@ -14,6 +14,8 @@ import deleteRampCustomField from '@salesforce/apex/RampConfigurationController.
 import syncTransactions from '@salesforce/apex/RampConfigurationController.syncTransactions';
 import getTransactionSyncStats from '@salesforce/apex/RampConfigurationController.getTransactionSyncStats';
 import getRecentTransactionFailures from '@salesforce/apex/RampConfigurationController.getRecentTransactionFailures';
+import getReferenceLookupConfig from '@salesforce/apex/RampConfigurationController.getReferenceLookupConfig';
+import saveReferenceLookupConfig from '@salesforce/apex/RampConfigurationController.saveReferenceLookupConfig';
 
 export default class RampConfiguration extends LightningElement {
     // Optional deep-link target tab (set by a host such as rampHome). Defaults
@@ -36,6 +38,8 @@ export default class RampConfiguration extends LightningElement {
     @track transactionStats = { total: 0, synced: 0, pending: 0, failed: 0 };
     @track transactionStatsLoading = false;
     @track transactionFailures = [];
+    @track referenceLookupEnabled = false;
+    @track referenceKeyTemplate = '';
 
     transactionFailureColumns = [
         { label: 'Ramp Txn Id', fieldName: 'rampTransactionId', type: 'text', initialWidth: 280 },
@@ -149,6 +153,62 @@ export default class RampConfiguration extends LightningElement {
                 this.showToast('Success', result, 'success');
             })
             .catch(error => {
+                this.showToast('Error', this.getErrorMessage(error), 'error');
+            })
+            .finally(() => {
+                this.isLoading = false;
+            });
+    }
+
+    get referenceTemplatePlaceholder() {
+        return '{merchant_name}-{memo}';
+    }
+
+    // Commonly-useful Ramp transaction attributes for the Reference key template.
+    // Any other top-level or nested transaction API field also works; these are
+    // the ones most useful as lookup keys. (card_holder has no email field —
+    // cardholder email is resolved separately and isn't template-addressable.)
+    get supportedReferenceTokens() {
+        return [
+            { token: '{merchant_name}', desc: 'Ramp-normalized merchant name (e.g. Chipotle)' },
+            { token: '{merchant_descriptor}', desc: 'Raw card-network statement descriptor' },
+            { token: '{merchant_category_code}', desc: 'MCC code' },
+            { token: '{merchant_category_code_description}', desc: 'MCC description' },
+            { token: '{sk_category_name}', desc: 'Ramp spend category name' },
+            { token: '{memo}', desc: 'Transaction memo' },
+            { token: '{currency_code}', desc: 'ISO currency code' },
+            { token: '{state}', desc: 'Transaction state (e.g. CLEARED)' },
+            { token: '{card_holder.first_name}', desc: 'Cardholder first name' },
+            { token: '{card_holder.last_name}', desc: 'Cardholder last name' },
+            { token: '{card_holder.department_name}', desc: 'Cardholder department' },
+            { token: '{card_holder.location_name}', desc: 'Cardholder location' },
+            { token: '{card_holder.employee_id}', desc: 'Cardholder employee id' }
+        ];
+    }
+
+    @wire(getReferenceLookupConfig)
+    wiredReferenceLookup({ data }) {
+        if (data) {
+            this.referenceLookupEnabled = data.enabled === true;
+            this.referenceKeyTemplate = data.template || '';
+        }
+    }
+
+    handleReferenceEnabledChange(event) {
+        this.referenceLookupEnabled = event.target.checked;
+    }
+
+    handleReferenceTemplateChange(event) {
+        this.referenceKeyTemplate = event.target.value;
+    }
+
+    handleSaveReferenceLookup() {
+        this.isLoading = true;
+        saveReferenceLookupConfig({ enabled: this.referenceLookupEnabled, template: this.referenceKeyTemplate })
+            .then((result) => {
+                this.showToast('Success', result, 'success');
+            })
+            .catch((error) => {
                 this.showToast('Error', this.getErrorMessage(error), 'error');
             })
             .finally(() => {

@@ -47,7 +47,9 @@ public with sharing class RampSyncSettingsService {
         }
 
         List<Ramp_Sync_Settings__mdt> records = [
-            SELECT Default_Ledger__c, Default_JE_Status__c, Sync_Grouping__c, Send_Sync_Ack__c
+            SELECT Default_Ledger__c, Default_JE_Status__c, Sync_Grouping__c, Send_Sync_Ack__c,
+                   Vendor_Match_Requires_Payment_History__c,
+                   Enable_Reference_Lookup__c, Reference_Key_Template__c
             FROM Ramp_Sync_Settings__mdt
             WHERE DeveloperName = 'Default'
             LIMIT 1
@@ -186,6 +188,24 @@ public with sharing class RampSyncSettingsService {
      * @description How transactions are grouped into Journal Entries.
      * Defaults to Daily when unset.
      */
+    /**
+     * @description When true, merchant-name vendor matching on card import only
+     * considers Accounts with at least one Cash Disbursement (payment history).
+     */
+    public static Boolean vendorMatchRequiresPaymentHistory() {
+        return getSettings().Vendor_Match_Requires_Payment_History__c == true;
+    }
+
+    /** @description Whether the Ramp Lookup Reference matching feature is enabled. */
+    public static Boolean referenceLookupEnabled() {
+        return getSettings().Enable_Reference_Lookup__c == true;
+    }
+
+    /** @description Merge template for the JE Line Reference key (e.g. {merchant_name}-{memo}). */
+    public static String getReferenceKeyTemplate() {
+        return getSettings().Reference_Key_Template__c;
+    }
+
     public static String getSyncGrouping() {
         String value = getSettings().Sync_Grouping__c;
         // Legacy 'By Run' (pre-0.4 picklist value) already produced one JE per

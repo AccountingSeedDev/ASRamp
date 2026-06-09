@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Override__c</fullName>
+    <defaultValue>false</defaultValue>
+    <description>When checked, this row force-overwrites every field it specifies on the Journal Entry Line, including GL Account. When unchecked, attribution fields overwrite but GL Account is only filled when blank.</description>
+    <externalId>false</externalId>
+    <inlineHelpText>Checked: this row's values overwrite everything it specifies on the matched Journal Entry Line, including the GL Account from Ramp's coding. Unchecked: Vendor, Employee, GL Variables, Project, Project Task, and Product overwrite, but GL Account is set only when the line has none.</inlineHelpText>
+    <label>Override</label>
+    <type>Checkbox</type>
+</CustomField>

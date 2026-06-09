@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Enable_Reference_Lookup__c</fullName>
+    <defaultValue>false</defaultValue>
+    <description>When checked, card-transaction import computes a Reference key from the template, stamps it on the Journal Entry Line, and applies matching Ramp Lookup Reference defaults.</description>
+    <externalId>false</externalId>
+    <fieldManageability>SubscriberControlled</fieldManageability>
+    <label>Enable Reference Lookup</label>
+    <type>Checkbox</type>
+</CustomField>

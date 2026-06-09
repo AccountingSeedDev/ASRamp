@@ -537,4 +537,39 @@ public with sharing class RampConfigurationController {
         }
     }
 
+    // ───────────────────── Reference Lookup config ─────────────────────
+
+    public class ReferenceLookupConfig {
+        @AuraEnabled public Boolean enabled { get; set; }
+        @AuraEnabled public String template { get; set; }
+    }
+
+    /** @description Read the Reference Lookup toggle + key template for the config subtab. */
+    @AuraEnabled(cacheable=true)
+    public static ReferenceLookupConfig getReferenceLookupConfig() {
+        ReferenceLookupConfig cfg = new ReferenceLookupConfig();
+        cfg.enabled = RampSyncSettingsService.referenceLookupEnabled();
+        cfg.template = RampSyncSettingsService.getReferenceKeyTemplate();
+        return cfg;
+    }
+
+    /**
+     * @description Save the Reference Lookup toggle + template. Reads the current
+     * Default settings record and re-deploys it with only these two values
+     * changed (a CMDT deploy replaces the record, so the rest must be preserved).
+     */
+    @AuraEnabled
+    public static String saveReferenceLookupConfig(Boolean enabled, String template) {
+        try {
+            Ramp_Sync_Settings__mdt s = RampSyncSettingsService.getSettings();
+            System.enqueueJob(new RampSyncSettingsDeployQueueable(
+                s.Default_Ledger__c, s.Default_JE_Status__c, s.Sync_Grouping__c,
+                s.Send_Sync_Ack__c, s.Vendor_Match_Requires_Payment_History__c,
+                enabled, template));
+            return 'Reference Lookup settings saved. Changes apply on the next sync.';
+        } catch (Exception e) {
+            throw new AuraHandledException('Could not save Reference Lookup settings: ' + e.getMessage());
+        }
+    }
+
 }

@@ -126,6 +126,7 @@ private class RampJournalEntryBuilderTest {
         t.sync_status = 'SYNC_READY';
         t.entity_id = 'entity-uuid-sample';
         t.card_holder = new RampJournalEntryBuilder.CardHolder();
+        t.card_holder.user_id = 'ramp-user-' + id;
         t.card_holder.first_name = 'Jane';
         t.card_holder.last_name = 'Doe';
 
@@ -175,6 +176,7 @@ private class RampJournalEntryBuilderTest {
         System.assertEquals(50.0, debit.AcctSeed__Debit__c);
         System.assertEquals(null, debit.AcctSeed__Credit__c);
         System.assertEquals(pickPeriodDate(), debit.AcctSeed__Date__c, 'Debit line carries the txn date');
+        System.assertEquals('txn-1', debit.Ramp_Id__c, 'Ramp transaction id stamped on the line');
         System.assertEquals('Acme Coffee', debit.Ramp_Vendor_Name__c, 'Merchant name carried onto the line');
         System.assertEquals(null, debit.AcctSeed__Account__c, 'Untracked merchant must not match an Account');
 
@@ -574,5 +576,182 @@ private class RampJournalEntryBuilderTest {
             'Merchant name still recorded as text even with no Account match');
         System.assertEquals(0, [SELECT COUNT() FROM Account WHERE Name = 'Chipotle'],
             'No Account auto-created for untracked merchants');
+    }
+
+    @IsTest
+    static void computeReferenceKey_nestedPathsAndBlankTokens() {
+        Map<String, Object> raw = new Map<String, Object>{
+            'merchant_name' => 'Acme',
+            'memo' => null,
+            'card_holder' => new Map<String, Object>{ 'email' => 'a@b.com' }
+        };
+        // blank token -> empty segment; tokens are case-insensitive; nested paths work
+        System.assertEquals('Acme-', RampJournalEntryBuilder.computeReferenceKey('{merchant_name}-{memo}', raw));
+        System.assertEquals('a@b.com', RampJournalEntryBuilder.computeReferenceKey('{Card_Holder.Email}', raw));
+        System.assertEquals('', RampJournalEntryBuilder.computeReferenceKey('{does.not.exist}', raw));
+    }
+
+    @IsTest
+    static void build_referenceLookup_appliesAttributionAndKey() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-ref-1');
+        Account lump = createVendorAccount('CC-Travel Meals', null);
+        RampSyncSettingsService.overrideSettings.Enable_Reference_Lookup__c = true;
+        RampSyncSettingsService.overrideSettings.Reference_Key_Template__c = '{merchant_name}';
+        insert new Ramp_Lookup_Reference__c(Reference__c = 'Chipotle', Vendor__c = lump.Id);
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-ref', 12.0, 'gl-ref-1');
+        t.merchant_name = 'Chipotle';
+        Map<String, Object> rawByTxnId = new Map<String, Object>{
+            'txn-ref' => new Map<String, Object>{ 'id' => 'txn-ref', 'merchant_name' => 'Chipotle' }
+        };
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult res = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY, new Map<String, String>(), rawByTxnId);
+        Test.stopTest();
+
+        AcctSeed__Journal_Entry_Line__c debit = res.successful[0].lines[0];
+        AcctSeed__Journal_Entry_Line__c clearing = res.successful[0].lines[1];
+        System.assertEquals('Chipotle', debit.AcctSeed__Reference__c, 'Key stamped on debit');
+        System.assertEquals('Chipotle', clearing.AcctSeed__Reference__c, 'Key stamped on clearing too (tracing)');
+        System.assertEquals(lump.Id, debit.AcctSeed__Account__c, 'Reference vendor applied to expense line');
+        System.assertEquals(null, clearing.AcctSeed__Account__c, 'Clearing line not touched by reference attribution');
+    }
+
+    @IsTest
+    static void build_referenceLookup_glFillsBlankButOverrideForces() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('CodedGL', 'gl-ref-2');
+        AcctSeed__GL_Account__c refGL = createCodedGL('RefGL', 'gl-ref-override');
+        RampSyncSettingsService.overrideSettings.Enable_Reference_Lookup__c = true;
+        RampSyncSettingsService.overrideSettings.Reference_Key_Template__c = '{merchant_name}';
+        // Override OFF: coded GL on the transaction must survive.
+        insert new Ramp_Lookup_Reference__c(Reference__c = 'NoOverride', GL_Account__c = refGL.Id, Override__c = false);
+        // Override ON: reference GL force-replaces the coded GL.
+        insert new Ramp_Lookup_Reference__c(Reference__c = 'DoOverride', GL_Account__c = refGL.Id, Override__c = true);
+
+        RampJournalEntryBuilder.RampTransaction noOv = sampleTransaction('txn-noov', 10.0, 'gl-ref-2');
+        noOv.merchant_name = 'NoOverride';
+        RampJournalEntryBuilder.RampTransaction doOv = sampleTransaction('txn-doov', 10.0, 'gl-ref-2');
+        doOv.merchant_name = 'DoOverride';
+        Map<String, Object> rawByTxnId = new Map<String, Object>{
+            'txn-noov' => new Map<String, Object>{ 'id' => 'txn-noov', 'merchant_name' => 'NoOverride' },
+            'txn-doov' => new Map<String, Object>{ 'id' => 'txn-doov', 'merchant_name' => 'DoOverride' }
+        };
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult res = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ noOv, doOv },
+            RampSyncSettingsService.GROUPING_DAILY, new Map<String, String>(), rawByTxnId);
+        Test.stopTest();
+
+        Id codedGLId = [SELECT Id FROM AcctSeed__GL_Account__c WHERE Ramp_Id__c = 'gl-ref-2' LIMIT 1].Id;
+        Map<String, AcctSeed__Journal_Entry_Line__c> byExt = new Map<String, AcctSeed__Journal_Entry_Line__c>();
+        for (RampJournalEntryBuilder.JournalEntryBuild b : res.successful) {
+            for (AcctSeed__Journal_Entry_Line__c l : b.lines) byExt.put(l.AcctSeed__ExtId__c, l);
+        }
+        System.assertEquals(codedGLId, byExt.get('txn-noov:dr:0').AcctSeed__GL_Account__c,
+            'Override OFF: coded GL preserved');
+        System.assertEquals(refGL.Id, byExt.get('txn-doov:dr:0').AcctSeed__GL_Account__c,
+            'Override ON: reference GL forced');
+    }
+
+    @IsTest
+    static void build_cardholderEmail_stampsAndResolvesEmployee() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-1');
+        User admin = [SELECT Id, Email FROM User WHERE Id = :TestDataFactory.getInstance().getAdminUser().Id];
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-emp', 50.0, 'gl-uuid-1');
+        // card_holder.user_id is 'ramp-user-txn-emp' (set by the helper).
+        Map<String, String> emailByUserId = new Map<String, String>{ 'ramp-user-txn-emp' => admin.Email };
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY, emailByUserId
+        );
+        Test.stopTest();
+
+        RampJournalEntryBuilder.JournalEntryBuild tb = result.successful[0];
+        for (AcctSeed__Journal_Entry_Line__c l : tb.lines) {
+            System.assertEquals(admin.Email, l.Ramp_User_Email__c, 'Email stamped on every line');
+            System.assertEquals(admin.Id, l.AcctSeed__Employee__c, 'Employee resolved from matching User');
+        }
+    }
+
+    @IsTest
+    static void build_cardholderEmail_unmatchedLeavesEmployeeBlank() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-1');
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-noemp', 50.0, 'gl-uuid-1');
+        Map<String, String> emailByUserId = new Map<String, String>{
+            'ramp-user-txn-noemp' => 'nobody-' + System.now().getTime() + '@nomatch.example'
+        };
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY, emailByUserId
+        );
+        Test.stopTest();
+
+        AcctSeed__Journal_Entry_Line__c debit = result.successful[0].lines[0];
+        System.assert(debit.Ramp_User_Email__c.endsWith('@nomatch.example'), 'Email still stamped');
+        System.assertEquals(null, debit.AcctSeed__Employee__c, 'No matching User -> Employee blank');
+    }
+
+    @IsTest
+    static void build_merchantName_matchesThroughSuffixStrippedContainment() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-1');
+        Account apple = createVendorAccount('Apple, Inc.', null);
+
+        // Exact fails ('apple online store' != 'apple, inc.'); normalization
+        // strips the legal suffix to 'apple', then containment matches.
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-apple', 42.0, 'gl-uuid-1');
+        t.merchant_name = 'Apple Online Store';
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(apple.Id, result.successful[0].lines[0].AcctSeed__Account__c,
+            'Suffix-stripped containment should match Apple Online Store -> Apple, Inc.');
+    }
+
+    @IsTest
+    static void build_merchantMatch_paymentHistoryFilterExcludesUnpaidVendors() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        // Require disbursement history: the test vendor has none, so even an
+        // exact merchant-name match must be excluded from the candidate pool.
+        RampSyncSettingsService.overrideSettings.Vendor_Match_Requires_Payment_History__c = true;
+        createCodedGL('ExpenseGL', 'gl-uuid-1');
+        createVendorAccount('Atlassian', null);
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-atl', 42.0, 'gl-uuid-1');
+        t.merchant_name = 'Atlassian';
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(null, result.successful[0].lines[0].AcctSeed__Account__c,
+            'Vendor without Cash Disbursement history must not match when the filter is on');
     }
 }

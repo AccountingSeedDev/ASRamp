@@ -18,4 +18,12 @@
         <field>Sync_Grouping__c</field>
         <value xsi:type="xsd:string">Daily</value>
     </values>
+    <values>
+        <field>Vendor_Match_Requires_Payment_History__c</field>
+        <value xsi:type="xsd:boolean">false</value>
+    </values>
+    <values>
+        <field>Enable_Reference_Lookup__c</field>
+        <value xsi:type="xsd:boolean">false</value>
+    </values>
 </CustomMetadata>

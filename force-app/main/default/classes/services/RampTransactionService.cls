@@ -60,9 +60,12 @@ public with sharing class RampTransactionService {
             return result;
         }
 
-        // 2. Build grouped JE(s) + lines.
+        // 2. Build grouped JE(s) + lines. Resolve cardholder emails first
+        //    (card_holder carries only user_id; email lives on the Users API).
         String grouping = RampSyncSettingsService.getSyncGrouping();
-        RampJournalEntryBuilder.BuildResult build = RampJournalEntryBuilder.build(transactions, grouping);
+        Map<String, String> emailByUserId = fetchCardholderEmails(transactions);
+        RampJournalEntryBuilder.BuildResult build = RampJournalEntryBuilder.build(
+            transactions, grouping, emailByUserId, page.rawByTxnId);
 
         // 3. Upsert one header per group via AcctSeed__ExtId__c (the group key).
         List<AcctSeed__Journal_Entry__c> headers = new List<AcctSeed__Journal_Entry__c>();
@@ -263,7 +266,21 @@ public with sharing class RampTransactionService {
             );
         }
         try {
-            return (TransactionPageResponse) JSON.deserialize(res.getBody(), TransactionPageResponse.class);
+            TransactionPageResponse parsed =
+                (TransactionPageResponse) JSON.deserialize(res.getBody(), TransactionPageResponse.class);
+            // JSON.deserialize skips field initializers, so the transient map is null here.
+            if (parsed.rawByTxnId == null) parsed.rawByTxnId = new Map<String, Object>();
+            // Stash raw attributes per txn id for the Reference Lookup template.
+            Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            Object rawData = body.get('data');
+            if (rawData instanceof List<Object>) {
+                for (Object o : (List<Object>) rawData) {
+                    Map<String, Object> txn = (Map<String, Object>) o;
+                    Object id = txn.get('id');
+                    if (id != null) parsed.rawByTxnId.put(String.valueOf(id), txn);
+                }
+            }
+            return parsed;
         } catch (Exception e) {
             throw new RampTransactionServiceException(
                 'Failed to parse transactions response: ' + e.getMessage() +
@@ -276,6 +293,37 @@ public with sharing class RampTransactionService {
     // --------------------------------------------------------------------
     //  Helpers
     // --------------------------------------------------------------------
+
+    /**
+     * @description Resolve the distinct cardholder user_ids on this page to
+     * emails via GET /developer/v1/users/{id}. card_holder carries only user_id;
+     * email lives on the User resource. Per-id fetch keeps callouts proportional
+     * to distinct cardholders on the page (typically a handful), not org size.
+     * Failures are swallowed per-user — a missing email just leaves the line's
+     * email/employee blank rather than failing the whole page.
+     */
+    @TestVisible
+    private static Map<String, String> fetchCardholderEmails(List<RampJournalEntryBuilder.RampTransaction> transactions) {
+        Set<String> userIds = new Set<String>();
+        for (RampJournalEntryBuilder.RampTransaction txn : transactions) {
+            if (txn.card_holder != null && String.isNotBlank(txn.card_holder.user_id)) {
+                userIds.add(txn.card_holder.user_id);
+            }
+        }
+        Map<String, String> emailByUserId = new Map<String, String>();
+        for (String userId : userIds) {
+            try {
+                HttpResponse res = RampAPIService.get('/developer/v1/users/' + EncodingUtil.urlEncode(userId, 'UTF-8'));
+                if (res.getStatusCode() < 200 || res.getStatusCode() >= 300) continue;
+                Map<String, Object> u = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+                Object email = u.get('email');
+                if (email != null) emailByUserId.put(userId, String.valueOf(email));
+            } catch (Exception e) {
+                System.debug(LoggingLevel.WARN, 'Ramp user email fetch failed for ' + userId + ': ' + e.getMessage());
+            }
+        }
+        return emailByUserId;
+    }
 
     /** @description Pull the `start` token out of Ramp's full next-page URL. */
     @TestVisible
@@ -321,6 +369,9 @@ public with sharing class RampTransactionService {
     public class TransactionPageResponse {
         public List<RampJournalEntryBuilder.RampTransaction> data;
         public PageMeta page;
+        // Raw, untyped attributes per transaction id — powers the Reference Lookup
+        // template (which can reference any/nested API field). Not from JSON.
+        public transient Map<String, Object> rawByTxnId = new Map<String, Object>();
     }
 
     public class PageMeta {

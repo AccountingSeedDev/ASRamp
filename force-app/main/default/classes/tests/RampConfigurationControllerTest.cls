@@ -445,6 +445,36 @@ private class RampConfigurationControllerTest {
         System.assertEquals('Synthesized error', (String) rows[0].get('error'));
     }
 
+    @IsTest
+    static void referenceLookupConfig_readAndSave() {
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'Actual',
+            Default_JE_Status__c = 'In Process',
+            Sync_Grouping__c = 'Daily',
+            Enable_Reference_Lookup__c = true,
+            Reference_Key_Template__c = '{merchant_name}-{memo}'
+        );
+        Test.startTest();
+        RampConfigurationController.ReferenceLookupConfig cfg = RampConfigurationController.getReferenceLookupConfig();
+        System.assertEquals(true, cfg.enabled);
+        System.assertEquals('{merchant_name}-{memo}', cfg.template);
+        // Save path enqueues the deploy queueable (Metadata deploy is skipped under test).
+        String msg = RampConfigurationController.saveReferenceLookupConfig(false, '{sk_category_name}');
+        System.assert(msg.contains('saved'), 'Expected a success message: ' + msg);
+        Test.stopTest();
+    }
+
+    @IsTest
+    static void settingsDeployQueueable_runsWithoutError() {
+        Test.startTest();
+        System.enqueueJob(new RampSyncSettingsDeployQueueable(
+            'Actual', 'In Process', 'Daily', true, false, true, '{merchant_name}'));
+        Test.stopTest();
+        // Reaches here without error — Metadata.Operations.enqueueDeployment is
+        // skipped under test; namespace + value building is exercised.
+        System.assert(true);
+    }
+
     /** Mock that always returns an empty page — used by syncTransactions_returnsJobId. */
     private class EmptyPageMock implements HttpCalloutMock {
         public HttpResponse respond(HttpRequest req) {

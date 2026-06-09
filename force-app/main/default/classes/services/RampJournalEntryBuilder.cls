@@ -111,11 +111,37 @@ public with sharing class RampJournalEntryBuilder {
      *        controls how transactions collapse into JE headers.
      */
     public static BuildResult build(List<RampTransaction> transactions, String grouping) {
+        return build(transactions, grouping, new Map<String, String>(), new Map<String, Object>());
+    }
+
+    public static BuildResult build(List<RampTransaction> transactions, String grouping, Map<String, String> emailByRampUserId) {
+        return build(transactions, grouping, emailByRampUserId, new Map<String, Object>());
+    }
+
+    /**
+     * @param emailByRampUserId Ramp user_id -> cardholder email, resolved by the
+     *        caller from Ramp's Users API (card_holder carries only user_id).
+     *        Used to stamp Ramp_User_Email__c and resolve AcctSeed__Employee__c.
+     * @param rawByTxnId Ramp txn id -> raw untyped transaction attributes, used
+     *        by the Reference Lookup template (supports nested dotted paths).
+     */
+    public static BuildResult build(List<RampTransaction> transactions, String grouping,
+            Map<String, String> emailByRampUserId, Map<String, Object> rawByTxnId) {
         BuildResult result = new BuildResult();
         if (transactions == null || transactions.isEmpty()) {
             return result;
         }
+        if (emailByRampUserId == null) emailByRampUserId = new Map<String, String>();
+        if (rawByTxnId == null) rawByTxnId = new Map<String, Object>();
         Boolean byPeriod = (grouping == RampSyncSettingsService.GROUPING_BY_PERIOD);
+
+        // Resolve cardholder emails to active Salesforce Users (for AcctSeed__Employee__c).
+        Map<String, Id> employeeByEmail = resolveEmployees(emailByRampUserId.values());
+
+        // Reference Lookup: compute per-txn keys from the template, then bulk-match
+        // the Ramp Lookup Reference table. Off by default.
+        Map<String, String> keyByTxnId = new Map<String, String>();
+        Map<String, Ramp_Lookup_Reference__c> refByKey = resolveReferences(transactions, rawByTxnId, keyByTxnId);
 
         // 1. Bulk-resolve all referenced GL and Variable option UUIDs to SF Ids.
         Set<String> glUuids = new Set<String>();
@@ -200,10 +226,14 @@ public with sharing class RampJournalEntryBuilder {
                 continue;
             }
 
+            String refKey = keyByTxnId.get(txn.id);
+            Ramp_Lookup_Reference__c refRow = String.isNotBlank(refKey) ? refByKey.get(refKey.toLowerCase()) : null;
+
             List<AcctSeed__Journal_Entry_Line__c> txnLines;
             try {
                 txnLines = buildTransactionLines(txn, txnDate, glByUuid, varByUuid,
-                    acctByVendorUuid, acctByMerchant, clearingGLId, suspenseGLId);
+                    acctByVendorUuid, acctByMerchant, emailByRampUserId, employeeByEmail,
+                    refKey, refRow, clearingGLId, suspenseGLId);
             } catch (BuildException e) {
                 result.failed.put(txn.id, e.getMessage());
                 continue;
@@ -276,6 +306,10 @@ public with sharing class RampJournalEntryBuilder {
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
         Map<String, Id> acctByVendorUuid,
         Map<String, Id> acctByMerchant,
+        Map<String, String> emailByRampUserId,
+        Map<String, Id> employeeByEmail,
+        String refKey,
+        Ramp_Lookup_Reference__c refRow,
         Id clearingGLId,
         Id suspenseGLId
     ) {
@@ -336,6 +370,40 @@ public with sharing class RampJournalEntryBuilder {
             clearing.AcctSeed__Credit__c = totalAmount;
         }
         lines.add(clearing);
+
+        // Cardholder attribution — transaction-level, so stamp every line
+        // (debit splits + clearing) like the vendor name.
+        String userId = (txn.card_holder != null) ? txn.card_holder.user_id : null;
+        String email = String.isNotBlank(userId) ? emailByRampUserId.get(userId) : null;
+        Id empId = String.isNotBlank(email) ? employeeByEmail.get(email.toLowerCase()) : null;
+        if (String.isNotBlank(email)) {
+            for (AcctSeed__Journal_Entry_Line__c l : lines) {
+                l.Ramp_User_Email__c = email;
+                l.AcctSeed__Employee__c = empId;
+            }
+        }
+
+        // Ramp transaction id on every line — a direct handle for
+        // RampTransactionAPI.getTransaction (no need to parse the ExtId).
+        for (AcctSeed__Journal_Entry_Line__c l : lines) {
+            l.Ramp_Id__c = txn.id;
+        }
+
+        // Reference Lookup: stamp the computed key on every line (tracing), then
+        // apply matched-row defaults to expense (debit) lines only — never the
+        // clearing line, whose GL/coding must stay the offset.
+        if (String.isNotBlank(refKey)) {
+            for (AcctSeed__Journal_Entry_Line__c l : lines) {
+                l.AcctSeed__Reference__c = refKey;
+            }
+        }
+        if (refRow != null) {
+            for (AcctSeed__Journal_Entry_Line__c l : lines) {
+                if (l.AcctSeed__ExtId__c != null && l.AcctSeed__ExtId__c.contains(':dr:')) {
+                    applyReference(l, refRow);
+                }
+            }
+        }
 
         return lines;
     }
@@ -570,10 +638,16 @@ public with sharing class RampJournalEntryBuilder {
     }
 
     /**
-     * @description Strict merchant-name fallback: lowercased merchant name ->
-     * existing vendor-typed Account. Exact name only (SOQL IN is
-     * case-insensitive), oldest Account wins ties, never creates records — so
-     * untracked T&E merchants resolve to nothing by design.
+     * @description Merchant-name fallback for the line-level Account lookup,
+     * tiered most- to least-deterministic:
+     *   1. exact name (case-insensitive)
+     *   2. normalized equality — legal suffixes stripped ('Apple, Inc.' ~ 'apple')
+     *   3. prefix containment on normalized names (both sides >= 5 chars)
+     * A tier only wins when exactly ONE Account qualifies — ambiguity means no
+     * match, and nothing is ever created, so untracked T&E merchants resolve to
+     * nothing by design. When Vendor_Match_Requires_Payment_History__c is on,
+     * candidates are restricted to vendors with Cash Disbursement history,
+     * which keeps junk/duplicate Accounts out of the pool.
      */
     private static Map<String, Id> resolveMerchantAccounts(List<RampTransaction> transactions) {
         Map<String, Id> result = new Map<String, Id>();
@@ -582,16 +656,206 @@ public with sharing class RampJournalEntryBuilder {
             if (String.isNotBlank(txn.merchant_name)) names.add(txn.merchant_name);
         }
         if (names.isEmpty()) return result;
-        for (Account a : [
-            SELECT Id, Name FROM Account
-            WHERE Name IN :names
-              AND AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
-            ORDER BY CreatedDate ASC
-        ]) {
-            String key = a.Name.toLowerCase();
-            if (!result.containsKey(key)) result.put(key, a.Id);
+
+        List<Account> candidates = RampSyncSettingsService.vendorMatchRequiresPaymentHistory()
+            ? [SELECT Id, Name FROM Account
+               WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
+                 AND Id IN (SELECT AcctSeed__Vendor__c FROM AcctSeed__Cash_Disbursement__c)
+               ORDER BY CreatedDate ASC]
+            : [SELECT Id, Name FROM Account
+               WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
+               ORDER BY CreatedDate ASC];
+        if (candidates.isEmpty()) return result;
+
+        Map<String, Id> exactByLower = new Map<String, Id>();
+        Map<String, Id> byNorm = new Map<String, Id>();
+        List<Id> candidateIds = new List<Id>();
+        List<String> candidateNorms = new List<String>();
+        for (Account a : candidates) {
+            String lower = a.Name.trim().toLowerCase();
+            if (!exactByLower.containsKey(lower)) exactByLower.put(lower, a.Id);
+            String norm = normalizeVendorName(a.Name);
+            if (String.isBlank(norm)) continue;
+            if (!byNorm.containsKey(norm)) byNorm.put(norm, a.Id);
+            candidateIds.add(a.Id);
+            candidateNorms.add(norm);
+        }
+
+        for (String rawName : names) {
+            // Tier 1: exact
+            Id winner = exactByLower.get(rawName.trim().toLowerCase());
+            String norm = normalizeVendorName(rawName);
+            // Tier 2: normalized equality
+            if (winner == null && String.isNotBlank(norm)) {
+                winner = byNorm.get(norm);
+            }
+            // Tier 3: containment — unique winner only
+            if (winner == null && norm != null && norm.length() >= 5) {
+                Id only = null;
+                Boolean ambiguous = false;
+                for (Integer i = 0; i < candidateNorms.size(); i++) {
+                    String cn = candidateNorms[i];
+                    if (cn.length() < 5) continue;
+                    if (norm.startsWith(cn) || cn.startsWith(norm)) {
+                        if (only == null) {
+                            only = candidateIds[i];
+                        } else if (only != candidateIds[i]) {
+                            ambiguous = true;
+                            break;
+                        }
+                    }
+                }
+                if (only != null && !ambiguous) winner = only;
+            }
+            if (winner != null) result.put(rawName.toLowerCase(), winner);
         }
         return result;
+    }
+
+    /**
+     * @description Resolve cardholder emails to active Salesforce User Ids for
+     * AcctSeed__Employee__c. Case-insensitive, active users only; an email that
+     * maps to more than one active User is treated as ambiguous and skipped, so
+     * a wrong employee is never attributed.
+     */
+    private static Map<String, Id> resolveEmployees(List<String> emails) {
+        Map<String, Id> result = new Map<String, Id>();
+        Set<String> lowered = new Set<String>();
+        for (String e : emails) {
+            if (String.isNotBlank(e)) lowered.add(e.toLowerCase());
+        }
+        if (lowered.isEmpty()) return result;
+
+        Set<String> ambiguous = new Set<String>();
+        for (User u : [SELECT Id, Email FROM User WHERE Email IN :lowered AND IsActive = true]) {
+            String key = u.Email.toLowerCase();
+            if (ambiguous.contains(key)) continue;
+            if (result.containsKey(key)) { result.remove(key); ambiguous.add(key); }
+            else { result.put(key, u.Id); }
+        }
+        return result;
+    }
+
+    // --------------------------------------------------------------------
+    //  Reference Lookup
+    // --------------------------------------------------------------------
+
+    /**
+     * @description When the Reference Lookup feature is on and a template is set,
+     * compute each transaction's key (writing into keyByTxnId) and bulk-load the
+     * matching Ramp Lookup Reference rows. Returns lowercased-key -> row.
+     */
+    private static Map<String, Ramp_Lookup_Reference__c> resolveReferences(
+        List<RampTransaction> transactions, Map<String, Object> rawByTxnId, Map<String, String> keyByTxnId
+    ) {
+        Map<String, Ramp_Lookup_Reference__c> refByKey = new Map<String, Ramp_Lookup_Reference__c>();
+        if (!RampSyncSettingsService.referenceLookupEnabled()) return refByKey;
+        String template = RampSyncSettingsService.getReferenceKeyTemplate();
+        if (String.isBlank(template)) return refByKey;
+
+        Set<String> keys = new Set<String>();
+        for (RampTransaction txn : transactions) {
+            if (String.isBlank(txn.id)) continue;
+            Object raw = rawByTxnId.get(txn.id);
+            Map<String, Object> rawMap = (raw instanceof Map<String, Object>)
+                ? (Map<String, Object>) raw : new Map<String, Object>();
+            String key = computeReferenceKey(template, rawMap);
+            keyByTxnId.put(txn.id, key);
+            if (String.isNotBlank(key)) keys.add(key);
+        }
+        if (keys.isEmpty()) return refByKey;
+
+        // Reference__c is a case-insensitive unique external id, so SOQL IN
+        // matches regardless of case; map by lowercased key for lookup.
+        for (Ramp_Lookup_Reference__c r : [
+            SELECT Reference__c, Override__c, GL_Account__c, Vendor__c, Employee__c, Product__c,
+                   Project__c, Project_Task__c, GL_Account_Variable_1__c, GL_Account_Variable_2__c,
+                   GL_Account_Variable_3__c, GL_Account_Variable_4__c
+            FROM Ramp_Lookup_Reference__c
+            WHERE Reference__c IN :keys
+        ]) {
+            String k = r.Reference__c.toLowerCase();
+            if (!refByKey.containsKey(k)) refByKey.put(k, r);
+        }
+        return refByKey;
+    }
+
+    /**
+     * @description Build a Reference key by substituting {token} occurrences in
+     * the template with values resolved from the raw transaction map. Tokens are
+     * case-insensitive, support nested dotted paths ({card_holder.email}), and
+     * resolve null/missing to empty string.
+     */
+    @TestVisible
+    private static String computeReferenceKey(String template, Map<String, Object> raw) {
+        if (String.isBlank(template)) return '';
+        Set<String> tokens = new Set<String>();
+        Matcher m = Pattern.compile('\\{([^}]+)\\}').matcher(template);
+        while (m.find()) tokens.add(m.group(1));
+        String result = template;
+        for (String tok : tokens) {
+            String val = resolveToken(tok.trim(), raw);
+            result = result.replace('{' + tok + '}', val == null ? '' : val);
+        }
+        return result;
+    }
+
+    /** @description Resolve a (possibly dotted) token path against a raw map, case-insensitively. */
+    private static String resolveToken(String path, Map<String, Object> raw) {
+        Object cur = raw;
+        for (String seg : path.split('\\.')) {
+            if (!(cur instanceof Map<String, Object>)) return '';
+            Map<String, Object> mp = (Map<String, Object>) cur;
+            Object found = null;
+            for (String k : mp.keySet()) {
+                if (k.equalsIgnoreCase(seg)) { found = mp.get(k); break; }
+            }
+            cur = found;
+            if (cur == null) return '';
+        }
+        return (cur == null) ? '' : String.valueOf(cur);
+    }
+
+    /**
+     * @description Apply a matched reference row's defaults to an expense line.
+     * Attribution fields overwrite; GL Account only fills a blank unless the row
+     * is flagged Override (which force-overwrites GL too). Null ref fields no-op.
+     */
+    private static void applyReference(AcctSeed__Journal_Entry_Line__c line, Ramp_Lookup_Reference__c r) {
+        if (r.Vendor__c != null) line.AcctSeed__Account__c = r.Vendor__c;
+        if (r.Employee__c != null) line.AcctSeed__Employee__c = r.Employee__c;
+        if (r.GL_Account_Variable_1__c != null) line.AcctSeed__GL_Account_Variable_1__c = r.GL_Account_Variable_1__c;
+        if (r.GL_Account_Variable_2__c != null) line.AcctSeed__GL_Account_Variable_2__c = r.GL_Account_Variable_2__c;
+        if (r.GL_Account_Variable_3__c != null) line.AcctSeed__GL_Account_Variable_3__c = r.GL_Account_Variable_3__c;
+        if (r.GL_Account_Variable_4__c != null) line.AcctSeed__GL_Account_Variable_4__c = r.GL_Account_Variable_4__c;
+        if (r.Project__c != null) line.AcctSeed__Project__c = r.Project__c;
+        if (r.Project_Task__c != null) line.AcctSeed__Project_Task__c = r.Project_Task__c;
+        if (r.Product__c != null) line.AcctSeed__Product__c = r.Product__c;
+        if (r.GL_Account__c != null && (r.Override__c == true || line.AcctSeed__GL_Account__c == null)) {
+            line.AcctSeed__GL_Account__c = r.GL_Account__c;
+        }
+    }
+
+    /**
+     * @description Vendor-name normalization shared by the matching tiers:
+     * lowercase, peel trailing legal/corporate suffix tokens (Inc, Corp, LLC,
+     * Group, Technologies, ...), drop non-alphanumerics, strip trailing store
+     * numbers ('CHICK-FIL-A #02231' -> 'chickfila').
+     */
+    @TestVisible
+    private static String normalizeVendorName(String s) {
+        if (String.isBlank(s)) return null;
+        String n = s.toLowerCase().replaceAll('[^a-z0-9 ]', ' ').normalizeSpace();
+        Boolean stripped = true;
+        while (stripped && n.contains(' ')) {   // never strip the only remaining word
+            String before = n;
+            n = n.replaceAll(
+                '\\b(incorporated|corporation|technologies|technology|company|limited|holdings|management|enterprises|solutions|inc|corp|co|llc|llp|ltd|plc|gmbh|bv|nv|sa|ag|group)$',
+                '').trim();
+            stripped = (n != before);
+        }
+        n = n.replaceAll('[^a-z0-9]', '');
+        return n.replaceAll('[0-9]+$', '');
     }
 
     private static Id asAccountId(String s) {

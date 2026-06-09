@@ -277,6 +277,76 @@
                     </div>
                 </lightning-tab>
 
+                <!-- Reference Lookup Tab -->
+                <lightning-tab label="Reference Lookup" value="referencelookup" icon-name="utility:search">
+                    <div class="slds-p-around_small">
+                        <div class="slds-box slds-theme_default">
+                            <p class="slds-text-body_small slds-m-bottom_small">
+                                Map Ramp transactions to default Journal Entry Line values using the&nbsp;<strong>Ramp Lookup Reference</strong>&nbsp;table (a VLOOKUP-style key&rarr;values list).
+                                Build a key from transaction attributes with a merge template &mdash; e.g.&nbsp;<code>&#123;merchant_name&#125;-&#123;memo&#125;</code>. Tokens are Ramp transaction API field names and support nested paths like&nbsp;<code>&#123;card_holder.department_name&#125;</code>; missing values resolve to blank.
+                                At import the key is written to the line's Reference field and matched against the table.
+                            </p>
+
+                            <lightning-input
+                                type="toggle"
+                                label="Enable Reference Lookup"
+                                message-toggle-active="On"
+                                message-toggle-inactive="Off"
+                                checked={referenceLookupEnabled}
+                                onchange={handleReferenceEnabledChange}
+                                class="slds-m-bottom_small">
+                            </lightning-input>
+
+                            <lightning-input
+                                type="text"
+                                label="Reference Key Template"
+                                value={referenceKeyTemplate}
+                                placeholder={referenceTemplatePlaceholder}
+                                onchange={handleReferenceTemplateChange}
+                                max-length="255"
+                                class="slds-m-bottom_medium">
+                            </lightning-input>
+
+                            <lightning-button
+                                variant="brand"
+                                label="Save"
+                                onclick={handleSaveReferenceLookup}
+                                disabled={isLoading}
+                                icon-name="utility:save">
+                            </lightning-button>
+                            <p class="slds-text-body_small slds-text-color_weak slds-m-top_small">
+                                Changes are saved as Custom Metadata and apply on the next sync.
+                                Maintain the mappings themselves in the Ramp Lookup References tab.
+                            </p>
+                        </div>
+
+                        <!-- Supported merge properties -->
+                        <div class="slds-box slds-theme_shade slds-m-top_medium">
+                            <h3 class="slds-text-title_caps slds-m-bottom_x-small">Available merge properties</h3>
+                            <p class="slds-text-body_small slds-m-bottom_small">
+                                Wrap any of these in braces inside the template. Other top-level or nested
+                                Ramp transaction API fields work too &mdash; these are the most useful as keys.
+                            </p>
+                            <table class="slds-table slds-table_bordered slds-table_cell-buffer slds-table_striped">
+                                <thead>
+                                    <tr class="slds-line-height_reset">
+                                        <th scope="col"><div class="slds-truncate">Property</div></th>
+                                        <th scope="col"><div class="slds-truncate">Description</div></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template for:each={supportedReferenceTokens} for:item="tok">
+                                        <tr key={tok.token} class="slds-hint-parent">
+                                            <td><code>{tok.token}</code></td>
+                                            <td><div class="slds-truncate" title={tok.desc}>{tok.desc}</div></td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </lightning-tab>
+
             </lightning-tabset>
 
             <!-- Loading Spinner -->

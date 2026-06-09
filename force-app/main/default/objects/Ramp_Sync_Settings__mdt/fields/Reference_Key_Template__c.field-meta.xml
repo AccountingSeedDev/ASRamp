@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Reference_Key_Template__c</fullName>
+    <description>Merge template used to compute the Journal Entry Line Reference key from Ramp transaction attributes, e.g. {merchant_name}-{memo}. Tokens are transaction API field names (dotted paths allowed, e.g. {card_holder.email}); null tokens resolve to empty string.</description>
+    <externalId>false</externalId>
+    <fieldManageability>SubscriberControlled</fieldManageability>
+    <label>Reference Key Template</label>
+    <length>255</length>
+    <required>false</required>
+    <type>Text</type>
+</CustomField>

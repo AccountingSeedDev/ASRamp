@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Vendor_Match_Requires_Payment_History__c</fullName>
+    <defaultValue>false</defaultValue>
+    <description>When checked, merchant-name vendor matching on card-transaction import only considers Accounts with at least one Cash Disbursement (real payment history). Unchecked = match against all vendor-typed Accounts.</description>
+    <externalId>false</externalId>
+    <fieldManageability>SubscriberControlled</fieldManageability>
+    <label>Vendor Match Requires Payment History</label>
+    <type>Checkbox</type>
+</CustomField>

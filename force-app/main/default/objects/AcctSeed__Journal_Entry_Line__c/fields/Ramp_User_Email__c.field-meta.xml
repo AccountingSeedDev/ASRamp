@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Ramp_User_Email__c</fullName>
+    <description>The Ramp cardholder's email from the card transaction this line was built from. Populated on every Ramp-synced line regardless of whether the email matched a Salesforce User.</description>
+    <externalId>false</externalId>
+    <label>Ramp User Email</label>
+    <length>255</length>
+    <required>false</required>
+    <trackFeedHistory>false</trackFeedHistory>
+    <trackTrending>false</trackTrending>
+    <type>Text</type>
+    <unique>false</unique>
+</CustomField>

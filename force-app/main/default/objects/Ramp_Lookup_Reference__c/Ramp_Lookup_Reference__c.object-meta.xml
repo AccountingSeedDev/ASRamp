@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <description>Admin-maintained VLOOKUP table: a unique Reference key maps to default field values stamped onto Ramp card-transaction Journal Entry Lines at import.</description>
+    <label>Ramp Lookup Reference</label>
+    <pluralLabel>Ramp Lookup References</pluralLabel>
+    <nameField>
+        <displayFormat>RLR-{00000}</displayFormat>
+        <label>Reference Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <sharingModel>ReadWrite</sharingModel>
+    <visibility>Public</visibility>
+    <enableActivities>false</enableActivities>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+</CustomObject>
