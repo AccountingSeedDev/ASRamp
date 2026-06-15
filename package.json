@@ -13,7 +13,11 @@
     "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
     "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
     "prepare": "husky || true",
-    "precommit": "lint-staged"
+    "precommit": "lint-staged",
+    "code-intel:index": "npm --prefix code-intel run index",
+    "code-intel:enrich": "npm --prefix code-intel run enrich",
+    "code-intel:push": "bash scripts/code-intel-push.sh",
+    "code-intel:sync": "npm run code-intel:index && npm run code-intel:enrich && npm run code-intel:push"
   },
   "devDependencies": {
     "@lwc/eslint-plugin-lwc": "^3.1.0",
