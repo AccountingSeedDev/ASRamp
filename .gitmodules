@@ -1,0 +1,3 @@
+[submodule "code-intel"]
+	path = code-intel
+	url = https://github.com/AccountingSeedDev/code-intel.git
