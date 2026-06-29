@@ -1,0 +1,373 @@
+name: Execute Unit Tests On New Pull Requests
+
+# Runs selective Apex tests on ASRamp PRs and drives the Ralph-Wiggum
+# test-fix loop: on failure for a Claude Code (agent) PR it posts an
+# @devcodingagent comment with a retry counter (max 2), which re-triggers
+# claude-agent-workflow.yml so the agent can fix the failures and push again.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches:
+      - 'main'
+      - 'dev'
+      - 'dev-*'
+
+concurrency:
+  group: unit-tests-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # SFDX auth URL for the Dev Hub used to create scratch orgs.
+  # Reuses the existing org integration-user auth URL secret.
+  DEVHUB_SFDX_AUTH_URL: ${{ secrets.INT_USER_SFDX_AUTH_URL }}
+  # Accounting Seed Financial Suite (1GP) managed-package version to install
+  # before deploying ASRamp source. Matches the dependency alias in
+  # sfdx-project.json ("Accounting Seed Financial Suite (1GP) @3.392").
+  AS_PACKAGE_VERSION_ID: 04tg800000071QnAAI
+
+jobs:
+  unit_tests_on_new_pr:
+    name: "Unit tests on new PR"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # ── Step 1: Checkout PR branch ──────────────────────────────────
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GIT_PAT }}
+
+      # ── Step 2: Install SF CLI and authenticate to the Dev Hub ──────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install SF CLI and auth Dev Hub
+        run: |
+          set -euo pipefail
+          npm install --global @salesforce/cli
+          sf --version
+          if [ -z "${DEVHUB_SFDX_AUTH_URL:-}" ]; then
+            echo "ERROR: DEVHUB_SFDX_AUTH_URL secret is not set; cannot create scratch org." >&2
+            exit 1
+          fi
+          printf '%s' "$DEVHUB_SFDX_AUTH_URL" > devhub_auth.txt
+          sf org login sfdx-url --sfdx-url-file devhub_auth.txt --set-default-dev-hub --alias devhub
+          rm -f devhub_auth.txt
+
+      # ── Step 3: Determine which test classes to run ─────────────────
+      # ASRamp test classes live under classes/tests/, so the lookup
+      # searches the whole classes/ tree (not just the classes/ root).
+      - name: Determine selective test classes
+        id: tests
+        env:
+          GH_TOKEN: ${{ secrets.GIT_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Changed non-test Apex classes
+          CHANGED_CLASSES=$(gh pr diff "$PR_NUMBER" --name-only \
+            | grep 'force-app.*\.cls$' \
+            | grep -v 'Test\.cls$' \
+            | grep -v '\-meta\.xml$' \
+            | sed 's|.*/||; s|\.cls$||' || echo "")
+
+          echo "Changed classes: $CHANGED_CLASSES"
+
+          # Map each changed class to its test class anywhere under classes/
+          TEST_CLASSES=""
+          for cls in $CHANGED_CLASSES; do
+            if find force-app/main/default/classes -name "${cls}Test.cls" | grep -q .; then
+              TEST_CLASSES="${TEST_CLASSES:+$TEST_CLASSES,}${cls}Test"
+            fi
+          done
+
+          # Also include any directly changed test classes
+          CHANGED_TESTS=$(gh pr diff "$PR_NUMBER" --name-only \
+            | grep 'force-app.*Test\.cls$' \
+            | grep -v '\-meta\.xml$' \
+            | sed 's|.*/||; s|\.cls$||' || echo "")
+
+          for tst in $CHANGED_TESTS; do
+            if [[ "$TEST_CLASSES" != *"$tst"* ]]; then
+              TEST_CLASSES="${TEST_CLASSES:+$TEST_CLASSES,}${tst}"
+            fi
+          done
+
+          echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$TEST_CLASSES" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No test classes found for changed files."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Will run tests: $TEST_CLASSES"
+          fi
+
+      # ── Step 4: Post skip comment if no tests ──────────────────────
+      - name: Post skip comment
+        if: steps.tests.outputs.skip == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GIT_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body "$(cat <<'EOF'
+          <!-- bot-comment:test-results -->
+          No test classes found for changed files. Skipping selective Apex tests.
+          EOF
+          )"
+
+      # ── Step 5: Create scratch org, install AS package, deploy ──────
+      - name: Provision scratch org and deploy ASRamp
+        if: steps.tests.outputs.skip == 'false'
+        id: scratch-org
+        run: |
+          set -euo pipefail
+
+          # Create a namespaced scratch org from the project definition.
+          # (Namespace AcctSeedRamp comes from sfdx-project.json and must be
+          # linked to the Dev Hub.)
+          sf org create scratch \
+            --definition-file config/project-scratch-def.json \
+            --alias asramp_test \
+            --set-default \
+            --duration-days 1 \
+            --wait 20 \
+            --target-dev-hub devhub
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+          # Install the Accounting Seed Financial Suite managed-package dependency.
+          sf package install \
+            --package "$AS_PACKAGE_VERSION_ID" \
+            --target-org asramp_test \
+            --wait 30 \
+            --publish-wait 30 \
+            --no-prompt
+
+          # Deploy ASRamp source.
+          sf project deploy start \
+            --source-dir force-app/main/default \
+            --target-org asramp_test \
+            --wait 30
+
+          # Grant the Ramp admin permission set to the running user.
+          sf org assign permset --name Ramp_Admin --target-org asramp_test || \
+            echo "WARNING: could not assign Ramp_Admin (may already be assigned)"
+
+      # ── Step 6: Run selective Apex tests (JSON format) ──────────────
+      - name: Run selective Apex tests
+        if: steps.tests.outputs.skip == 'false'
+        id: run-tests
+        run: |
+          set -euo pipefail
+          TEST_CLASSES="${{ steps.tests.outputs.test_classes }}"
+          echo "Running tests: $TEST_CLASSES"
+
+          mkdir -p reports/unit
+
+          sf apex run test \
+            --class-names "$TEST_CLASSES" \
+            --wait 360 \
+            --result-format json \
+            --output-dir reports/unit \
+            --target-org asramp_test \
+            > reports/unit/test-output.json 2>/dev/null || true
+
+          # sf wraps output in {"status":..,"result":{...}}
+          OUTCOME=$(jq -r '.result.summary.outcome // "Failed"' reports/unit/test-output.json 2>/dev/null || echo "Failed")
+          echo "outcome=$OUTCOME" >> "$GITHUB_OUTPUT"
+
+          if [ "$OUTCOME" = "Passed" ]; then
+            echo "All selective tests passed."
+          else
+            echo "Tests failed. Parsing failures..."
+            exit 1
+          fi
+
+      # ── Step 7: Post success comment ────────────────────────────────
+      - name: Post success comment
+        if: steps.tests.outputs.skip == 'false' && steps.run-tests.outputs.outcome == 'Passed'
+        env:
+          GH_TOKEN: ${{ secrets.GIT_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TEST_CLASSES: ${{ steps.tests.outputs.test_classes }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
+          <!-- bot-comment:test-results -->
+          All selective Apex tests passed.
+
+          **Tests run:** $TEST_CLASSES
+          EOF
+          )"
+
+      # ── Step 8: Post failure comment (Ralph-Wiggum retry logic) ─────
+      # For Claude Code (agent) PRs, mention @devcodingagent with a retry
+      # counter (max 2) so claude-agent-workflow.yml re-triggers and the
+      # agent fixes the failures. After 2 attempts the mention is dropped
+      # and the loop stops, requesting manual review.
+      - name: Post failure comment
+        if: steps.tests.outputs.skip == 'false' && failure() && steps.run-tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GIT_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Parse test failures from JSON output
+          FAILURES=""
+          if [ -f reports/unit/test-output.json ]; then
+            FAILURES=$(python3 << 'PYEOF'
+          import json, sys
+
+          try:
+              with open("reports/unit/test-output.json") as f:
+                  data = json.load(f)
+          except Exception:
+              print("Could not parse test results JSON.")
+              sys.exit(0)
+
+          # sf wraps output in {"status":..,"result":{...}}
+          result = data.get("result", data)
+          tests = result.get("tests", [])
+          lines = []
+          for t in tests:
+              if t.get("Outcome") == "Fail":
+                  name = f"{t.get('ApexClass', {}).get('Name', '?')}.{t.get('MethodName', '?')}"
+                  msg = t.get("Message", "No message")
+                  stack = t.get("StackTrace", "No stack trace")
+                  lines.append(f"**{name}** — {msg}")
+                  lines.append(f"Stack trace: {stack}")
+                  lines.append("")
+
+          if not lines:
+              print("Tests failed but no individual failure details found in JSON.")
+          else:
+              print("\n".join(lines))
+          PYEOF
+          )
+          fi
+
+          if [ -z "$FAILURES" ]; then
+            FAILURES="Could not parse test failure details. Check the workflow run logs."
+          fi
+
+          # Determine if this is a ClaudeCode (agent) PR
+          IS_AGENT_PR="false"
+          PR_TITLE=$(gh pr view "$PR_NUMBER" --json title -q '.title')
+          if echo "$PR_TITLE" | grep -q "ClaudeCode"; then
+            IS_AGENT_PR="true"
+          fi
+
+          # Check retry count from existing test-results comments
+          RETRY_COUNT=0
+          if [ "$IS_AGENT_PR" = "true" ]; then
+            RETRY_COUNT=$(python3 << PYEOF
+          import json, re, subprocess, sys
+
+          try:
+              result = subprocess.run(
+                  ["gh", "pr", "view", "$PR_NUMBER", "--json", "comments",
+                   "-q", ".comments[].body"],
+                  capture_output=True, text=True, check=True
+              )
+              max_retry = 0
+              for line in result.stdout.splitlines():
+                  if "<!-- bot-comment:test-results -->" in line:
+                      match = re.search(r"<!-- retry:(\d+) -->", line)
+                      if match:
+                          n = int(match.group(1))
+                          if n > max_retry:
+                              max_retry = n
+              print(max_retry)
+          except Exception:
+              print("0")
+          PYEOF
+          )
+          fi
+
+          NEXT_RETRY=$((RETRY_COUNT + 1))
+
+          if [ "$IS_AGENT_PR" = "true" ] && [ "$NEXT_RETRY" -le 2 ]; then
+            # Agent PR, retries remaining — include @devcodingagent
+            gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
+          <!-- bot-comment:test-results -->
+          <!-- retry:$NEXT_RETRY -->
+          @devcodingagent Unit tests failed (attempt $NEXT_RETRY of 2). Please fix the following failures:
+
+          $FAILURES
+          EOF
+          )"
+          elif [ "$IS_AGENT_PR" = "true" ] && [ "$NEXT_RETRY" -gt 2 ]; then
+            # Agent PR, max retries reached — NO @devcodingagent (loop stops)
+            gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
+          <!-- bot-comment:test-results -->
+          <!-- retry:$NEXT_RETRY -->
+          Unit tests failed after $RETRY_COUNT fix attempts. **Manual review needed.**
+
+          $FAILURES
+          EOF
+          )"
+          else
+            # Human PR — plain failure comment
+            gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
+          <!-- bot-comment:test-results -->
+          Unit tests failed. See details below:
+
+          $FAILURES
+          EOF
+          )"
+          fi
+
+      # ── Step 9: Generate Results.txt for Slack (optional) ───────────
+      - name: Generate Slack failure report
+        if: failure() && steps.run-tests.outcome == 'failure'
+        run: |
+          python3 << 'PYEOF'
+          import json
+
+          try:
+              with open("reports/unit/test-output.json") as f:
+                  data = json.load(f)
+              result = data.get("result", data)
+              lines = ["=== Failures\n"]
+              for t in result.get("tests", []):
+                  if t.get("Outcome") == "Fail":
+                      name = f"{t.get('ApexClass', {}).get('Name', '?')}.{t.get('MethodName', '?')}"
+                      lines.append(f"Test Name: {name}")
+                      lines.append(f"Message: {t.get('Message', 'No message')}")
+                      lines.append(f"Stack Trace: {t.get('StackTrace', 'No stack trace')}\n")
+              with open("Results.txt", "w") as f:
+                  f.write("\n".join(lines))
+          except Exception:
+              with open("Results.txt", "w") as f:
+                  f.write("Could not parse test results.")
+          PYEOF
+
+      # ── Step 10: Upload failures to Slack (optional, non-blocking) ──
+      - name: Upload file to Slack
+        if: failure() && steps.run-tests.outcome == 'failure' && env.SLACK_CHANNEL_ID != ''
+        continue-on-error: true
+        env:
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: files.uploadV2
+          token: ${{ secrets.SLACK_BOT_TOKEN_NEW }}
+          payload: |
+            channel_id: ${{ secrets.SLACK_CHANNEL_ID }}
+            initial_comment: "ASRamp unit test failures for branch ${{ github.ref_name }}"
+            file: "${{ github.workspace }}/Results.txt"
+            filename: "Results.txt"
+
+      # ── Step 11: Delete scratch org ─────────────────────────────────
+      - name: Delete scratch org
+        if: always() && steps.scratch-org.outputs.created == 'true'
+        run: |
+          sf org delete scratch --no-prompt --target-org asramp_test || \
+            echo "Scratch org cleanup failed (may already be deleted)"

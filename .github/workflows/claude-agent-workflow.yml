@@ -1,0 +1,564 @@
+# WORKFLOW-OWNED FILE — Do not modify in feature branches.
+# Changes to this file should go through the DevOps team.
+#
+# Production agent workflow using Claude Code CLI headless mode.
+# Handles all JIRA → code triggers (repository_dispatch, PR comments,
+# PR close) plus workflow_dispatch for manual testing.
+
+name: Claude Agent Workflow
+
+on:
+  repository_dispatch:
+    types: [jira_issue_assigned_dev_agent]
+
+  issue_comment:
+    types: [created, edited]
+
+  pull_request_review_comment:
+    types: [created, edited]
+
+  pull_request_review:
+    types: [submitted, edited]
+
+  workflow_dispatch:
+    inputs:
+      issue_key:
+        description: "JIRA issue key (e.g., DO-220)"
+        required: true
+      customfield_11449:
+        description: "Release/Feature branch name from JIRA customfield_11718"
+        required: true
+
+concurrency:
+  group: agent-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.actor != 'github-actions[bot]'
+        && (
+          github.event_name != 'issue_comment'
+          || (
+            github.event.issue.pull_request
+            && github.event.comment.user.login != 'github-actions[bot]'
+            && contains(github.event.comment.body, '@devcodingagent')
+            && !contains(github.event.comment.body, '<!-- bot-comment:workflow-update -->')
+          )
+        )
+        && (
+          github.event_name != 'pull_request_review_comment'
+          || (
+            github.event.comment.user.login != 'github-actions[bot]'
+            && contains(github.event.comment.body, '@devcodingagent')
+            && !contains(github.event.comment.body, '<!-- bot-comment:workflow-update -->')
+          )
+        )
+        && (
+          github.event_name != 'pull_request_review'
+          || (
+            github.event.review.user.login != 'github-actions[bot]'
+            && contains(github.event.review.body || '', '@devcodingagent')
+            && !contains(github.event.review.body || '', '<!-- bot-comment:workflow-update -->')
+          )
+        )
+      }}
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write          # Required for AWS OIDC role assumption
+
+    steps:
+      # ── Step 1: Determine the correct branch ──────────────────────────
+      # Claude reads CLAUDE.md, system prompts, and MCP config at startup,
+      # so we must be on the developer's branch BEFORE Claude starts.
+      # This ensures developer-customized conventions are used.
+      - name: Determine target branch
+        id: target-branch
+        env:
+          GH_TOKEN: ${{ secrets.GIT_PAT }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          REF=""
+          BRANCH_TYPE=""
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            # Check if a PR already exists for this issue key
+            ISSUE_KEY="${{ github.event.inputs.issue_key }}"
+            PR_BRANCH=$(gh pr list --repo "$GH_REPO" --search "$ISSUE_KEY in:title" \
+              --json headRefName -q '.[0].headRefName' 2>/dev/null || echo "")
+            if [[ -n "$PR_BRANCH" ]]; then
+              REF="$PR_BRANCH"
+              BRANCH_TYPE="existing_pr"
+            else
+              REF="${{ github.event.inputs.customfield_11449 }}"
+              BRANCH_TYPE="base_branch"
+            fi
+
+          elif [[ "$EVENT" == "issue_comment" ]]; then
+            # Ralph Wiggum loop: test failure comment re-triggers the agent
+            PR_NUM="${{ github.event.issue.number }}"
+            REF=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json headRefName -q '.headRefName')
+            BRANCH_TYPE="existing_pr"
+
+            # Extract ISSUE_KEY from PR title (format: "DO-123 | ClaudeCode | ...")
+            PR_TITLE=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json title -q '.title')
+            ISSUE_KEY=$(echo "$PR_TITLE" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+            # Extract target branch from PR base branch
+            CUSTOMFIELD_11449=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json baseRefName -q '.baseRefName')
+            echo "ISSUE_KEY=$ISSUE_KEY" >> "$GITHUB_ENV"
+            echo "CUSTOMFIELD_11449=$CUSTOMFIELD_11449" >> "$GITHUB_ENV"
+
+          elif [[ "$EVENT" == "pull_request_review_comment" ]] || \
+               [[ "$EVENT" == "pull_request_review" ]]; then
+            # PR review comment with @devcodingagent
+            PR_NUM="${{ github.event.pull_request.number }}"
+            REF="${{ github.event.pull_request.head.ref }}"
+            BRANCH_TYPE="existing_pr"
+
+            # Extract ISSUE_KEY from PR title
+            PR_TITLE=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json title -q '.title')
+            ISSUE_KEY=$(echo "$PR_TITLE" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+            CUSTOMFIELD_11449=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json baseRefName -q '.baseRefName')
+            echo "ISSUE_KEY=$ISSUE_KEY" >> "$GITHUB_ENV"
+            echo "CUSTOMFIELD_11449=$CUSTOMFIELD_11449" >> "$GITHUB_ENV"
+
+          elif [[ "$EVENT" == "repository_dispatch" ]]; then
+            # JIRA ticket assigned to Dev Coding Agent
+            ISSUE_KEY="${{ github.event.client_payload.issue_key }}"
+            CUSTOMFIELD_11449="${{ github.event.client_payload.customfield_11449 }}"
+
+            # Check if PR already exists (jira_initial vs jira_reassignment)
+            PR_BRANCH=$(gh pr list --repo "$GH_REPO" --search "$ISSUE_KEY in:title" \
+              --json headRefName -q '.[0].headRefName' 2>/dev/null || echo "")
+            if [[ -n "$PR_BRANCH" ]]; then
+              REF="$PR_BRANCH"
+              BRANCH_TYPE="existing_pr"
+            else
+              REF="$CUSTOMFIELD_11449"
+              BRANCH_TYPE="base_branch"
+            fi
+
+            echo "ISSUE_KEY=$ISSUE_KEY" >> "$GITHUB_ENV"
+            echo "CUSTOMFIELD_11449=$CUSTOMFIELD_11449" >> "$GITHUB_ENV"
+          fi
+
+          echo "ref=$REF" >> $GITHUB_OUTPUT
+          echo "branch_type=$BRANCH_TYPE" >> $GITHUB_OUTPUT
+          echo "Checkout target: $REF (type: $BRANCH_TYPE)"
+
+      # ── Step 2: Checkout the determined branch ────────────────────────
+      # CLAUDE.md, prompts/, and mcp-servers.json come from this branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target-branch.outputs.ref }}
+          token: ${{ secrets.GIT_PAT }}
+          persist-credentials: true
+
+      # ── Step 3: Install tooling ───────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      # ── Step 4: Configure git ─────────────────────────────────────────
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── Step 4b: Configure AWS credentials for Bedrock ───────────────
+      # Uses OIDC to assume the Bedrock_Github IAM role — no long-lived
+      # access keys needed. AWS credentials are available to all
+      # subsequent steps (including Claude Code CLI and Python scripts).
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::170576735005:role/Bedrock_Github
+          aws-region: us-east-2
+
+      # ── Step 5: Fetch JIRA issue details ─────────────────────────────
+      # Pre-fetches summary, description, and reviewer so the agent
+      # doesn't spend turns on JIRA API calls. Also provides
+      # ISSUE_DESCRIPTION for the field validation safety net.
+      - name: Fetch JIRA issue details
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_TO_GH_MAP: ${{ secrets.JIRA_TO_GH_MAP }}
+          ISSUE_KEY: ${{ github.event.inputs.issue_key || env.ISSUE_KEY }}
+        run: python3 scripts/fetch_jira_details.py
+
+      # ── Step 5b: Detect latest Salesforce API version ───────────────
+      # Fetches the latest version from Salesforce's public endpoint
+      # (no auth needed) so generated -meta.xml files use the correct version.
+      - name: Detect Salesforce API version
+        run: |
+          SF_API_VERSION=$(python3 -c "
+          import json, urllib.request
+          try:
+              req = urllib.request.Request('https://na1.salesforce.com/services/data/', headers={'Accept': 'application/json'})
+              resp = urllib.request.urlopen(req, timeout=10)
+              versions = json.loads(resp.read().decode())
+              versions.sort(key=lambda v: float(v.get('version', '0')))
+              print(versions[-1]['version'])
+          except Exception:
+              print('65.0')
+          ")
+          echo "SF_API_VERSION=$SF_API_VERSION" >> $GITHUB_ENV
+          echo "Detected Salesforce API version: $SF_API_VERSION"
+
+      # ── Step 6: Build sub-agent definitions ──────────────────────────
+      # Dynamically builds the --agents JSON from prompt files so the
+      # orchestrator can spawn named sub-agents via the Task tool.
+      - name: Build sub-agent definitions from prompt files
+        id: agents
+        run: |
+          python3 << 'PYEOF'
+          import json, pathlib
+
+          defs = [
+              ("sf-code-gen", "prompts/sf-code-gen.md",
+               "Salesforce DX code generation specialist",
+               ["Read", "Write", "Edit", "Glob", "Grep"],
+               "sonnet"),
+              ("sf-code-review", "prompts/sf-code-review.md",
+               "Salesforce code review specialist",
+               ["Read", "Glob", "Grep", "Bash(git diff *)"],
+               "sonnet"),
+              ("sf-test-gen", "prompts/sf-test-gen.md",
+               "Apex test class generation specialist",
+               ["Read", "Write", "Edit", "Glob", "Grep"],
+               "sonnet"),
+              ("architect", "prompts/architect.md",
+               "Implementation planner for complex tickets",
+               ["Read", "Glob", "Grep"],
+               "opus"),
+              ("comment-writer", None,
+               "Write concise PR and JIRA comment summaries",
+               ["Read", "Glob"],
+               "haiku"),
+          ]
+
+          agents = {}
+          for name, path, desc, tools, model in defs:
+              prompt = pathlib.Path(path).read_text() if path else desc
+              agents[name] = {
+                  "description": desc,
+                  "prompt": prompt,
+                  "tools": tools,
+                  "model": model
+              }
+
+          pathlib.Path("/tmp/agents.json").write_text(json.dumps(agents))
+          print(f"Built {len(agents)} sub-agent definitions")
+          PYEOF
+
+      # ── Step 6b: Transition JIRA issue to In Progress ───────────────
+      # Deterministic pre-agent step — does not rely on the agent
+      # remembering to call JIRA MCP or curl.
+      - name: Transition JIRA issue to In Progress
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ github.event.inputs.issue_key || env.ISSUE_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import base64, json, os, sys, urllib.request
+
+          base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+          issue = os.environ.get("ISSUE_KEY")
+          email = os.environ.get("JIRA_USER_EMAIL")
+          token = os.environ.get("JIRA_API_TOKEN")
+          target_name = "In Progress"
+
+          if not base or not issue or not email or not token:
+              print("Missing JIRA config; skipping transition.")
+              sys.exit(0)
+
+          def call(method, url, data=None):
+              auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+              headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
+              if data is not None:
+                  headers["Content-Type"] = "application/json"
+                  data = json.dumps(data).encode()
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read().decode() or "{}")
+
+          try:
+              transitions = call("GET", f"{base}/rest/api/3/issue/{issue}/transitions").get("transitions", [])
+          except Exception as e:
+              print(f"WARNING: Failed to fetch transitions: {e}")
+              sys.exit(0)
+
+          match = None
+          for t in transitions:
+              if (t.get("name") or "").lower() == target_name.lower():
+                  match = t
+                  break
+
+          if not match:
+              print(f"No '{target_name}' transition available; skipping.")
+              sys.exit(0)
+
+          try:
+              call("POST", f"{base}/rest/api/3/issue/{issue}/transitions", {"transition": {"id": match.get("id")}})
+              print(f"Transitioned {issue} to {target_name}.")
+          except Exception as e:
+              print(f"WARNING: Failed to transition {issue}: {e}")
+          PYEOF
+
+      # ── Step 6c: Verify MCP JIRA tools (transitions, assignments) ──
+      # Spawns the JIRA MCP server, connects via JSON-RPC, and verifies:
+      #   1. All 5 HTTP tools are registered (jira_get/post/put/patch/delete)
+      #   2. jira_get can read transitions for the issue
+      #   3. jira_get can read assignee for the issue
+      # Non-blocking: logs results but does NOT fail the workflow.
+      - name: Verify MCP JIRA tools
+        env:
+          ATLASSIAN_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ github.event.inputs.issue_key || env.ISSUE_KEY }}
+        run: |
+          export ATLASSIAN_SITE_NAME=$(echo "$JIRA_BASE_URL" | sed 's|https://||;s|\.atlassian\.net.*||')
+          if [ -f scripts/verify_mcp_tools.py ]; then
+            timeout 120 python3 scripts/verify_mcp_tools.py || echo "WARNING: MCP verification failed (agent will fall back to curl)"
+          else
+            echo "NOTE: verify_mcp_tools.py not found on this branch (older PR branch). Skipping MCP verification."
+          fi
+
+      # ── Step 6d: Save pre-agent HEAD SHA ────────────────────────────
+      # Used after the agent runs to detect if code was pushed.
+      - name: Save pre-agent HEAD SHA
+        id: pre-agent
+        run: echo "sha=$(git rev-parse HEAD 2>/dev/null || echo 'none')" >> $GITHUB_OUTPUT
+
+      # ── Step 7: Run the orchestrator agent ───────────────────────────
+      # Claude reads the orchestrator system prompt, CLAUDE.md (auto-loaded
+      # from repo root), and MCP server configs at startup.
+      # All env vars below are accessible to Claude via Bash tool.
+      - name: Run Orchestrator Agent
+        env:
+          CLAUDE_CODE_USE_BEDROCK: "1"
+          AWS_REGION: us-east-2
+          ANTHROPIC_MODEL: us.anthropic.claude-sonnet-4-6
+          ANTHROPIC_DEFAULT_SONNET_MODEL: us.anthropic.claude-sonnet-4-6
+          ANTHROPIC_DEFAULT_OPUS_MODEL: us.anthropic.claude-opus-4-6-v1
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          GITHUB_TOKEN: ${{ secrets.GIT_PAT }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_TO_GH_MAP: ${{ secrets.JIRA_TO_GH_MAP }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_KEY: ${{ github.event.inputs.issue_key || env.ISSUE_KEY }}
+          ISSUE_SUMMARY: ${{ env.ISSUE_SUMMARY }}
+          ISSUE_DESCRIPTION: ${{ env.ISSUE_DESCRIPTION }}
+          REVIEWER_GH: ${{ env.REVIEWER_GH }}
+          REVIEWER_ACCOUNT_ID: ${{ env.REVIEWER_ACCOUNT_ID }}
+          REVIEWER_DISPLAY: ${{ env.REVIEWER_DISPLAY }}
+          CUSTOMFIELD_11449: ${{ github.event.inputs.customfield_11449 || env.CUSTOMFIELD_11449 }}
+          BRANCH_TYPE: ${{ steps.target-branch.outputs.branch_type }}
+          TARGET_REF: ${{ steps.target-branch.outputs.ref }}
+          SF_API_VERSION: ${{ env.SF_API_VERSION }}
+          COMMENT_BODY: ${{ github.event.comment.body || github.event.review.body || '' }}
+        run: |
+          # Derive Atlassian site name for JIRA MCP server
+          export ATLASSIAN_SITE_NAME=$(echo "$JIRA_BASE_URL" | sed 's|https://||;s|\.atlassian\.net.*||')
+
+          claude -p "$(cat <<EOF
+          GitHub event received:
+          - Event type: $GITHUB_EVENT_NAME
+          - Issue Key: $ISSUE_KEY
+          - Issue Summary: $ISSUE_SUMMARY
+          - Release Branch: $CUSTOMFIELD_11449
+          - Repository: $GITHUB_REPOSITORY
+          - Branch type: $BRANCH_TYPE
+          - Checked-out branch: $TARGET_REF
+          - Reviewer (GitHub): $REVIEWER_GH
+          - Reviewer (JIRA Account ID): $REVIEWER_ACCOUNT_ID
+          - Salesforce API Version: $SF_API_VERSION
+          - Triggering comment: $COMMENT_BODY
+
+          IMPORTANT: Use Salesforce API version $SF_API_VERSION in ALL -meta.xml files.
+
+          Process this event according to your workflow rules.
+          The correct branch has already been checked out.
+          - If branch_type is "base_branch": this is a new assignment, create a feature branch.
+          - If branch_type is "existing_pr": the PR branch is already checked out, pull latest and work on it.
+          - If there is a triggering comment with test failures: this is a test-fix re-trigger. Read the failures and fix them.
+
+          Read the event payload at $GITHUB_EVENT_PATH for full event details.
+          ISSUE_DESCRIPTION and ISSUE_SUMMARY are pre-fetched in env vars — read them with Bash.
+          EOF
+          )" \
+            --append-system-prompt-file prompts/orchestrator-sf.md \
+            --mcp-config mcp-servers.json \
+            --agents "$(cat /tmp/agents.json)" \
+            --allowedTools "Read" "Write" "Edit" "Bash(git *)" "Bash(gh *)" "Bash(curl *)" "Glob" "Grep" "Task" \
+            --dangerously-skip-permissions \
+            --max-turns 80 \
+            --model sonnet
+
+      # ── Step 7b: Detect whether the agent pushed code changes ───────
+      # Compares HEAD before and after the agent ran.
+      # Downstream steps use this to decide whether to transition JIRA
+      # to "Code Review" and re-request a PR review.
+      - name: Check for code changes
+        id: code-changes
+        if: success()
+        run: |
+          PRE_SHA="${{ steps.pre-agent.outputs.sha }}"
+          POST_SHA=$(git rev-parse HEAD 2>/dev/null || echo 'none')
+          if [[ "$PRE_SHA" != "$POST_SHA" && "$POST_SHA" != "none" ]]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Agent pushed code changes (HEAD moved from $PRE_SHA to $POST_SHA)"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No code changes detected (HEAD unchanged at $PRE_SHA)"
+          fi
+
+      # ── Step 8: Reassign JIRA issue to reviewer ─────────────────────
+      # Post-agent safety net: ensures the JIRA ticket is reassigned to
+      # the reviewer whenever code changes are pushed (jira_initial,
+      # jira_reassignment, or pr_comment with code changes).
+      - name: Reassign JIRA issue to reviewer
+        if: success() && steps.code-changes.outputs.changed == 'true' && env.REVIEWER_ACCOUNT_ID != ''
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ github.event.inputs.issue_key || env.ISSUE_KEY }}
+          REVIEWER_ACCOUNT_ID: ${{ env.REVIEWER_ACCOUNT_ID }}
+        run: |
+          python3 << 'PYEOF'
+          import base64, json, os, sys, urllib.request
+
+          base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+          issue = os.environ["ISSUE_KEY"]
+          email = os.environ["JIRA_USER_EMAIL"]
+          token = os.environ["JIRA_API_TOKEN"]
+          reviewer = os.environ["REVIEWER_ACCOUNT_ID"]
+
+          auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+          url = f"{base}/rest/api/3/issue/{issue}/assignee"
+          data = json.dumps({"accountId": reviewer}).encode()
+          req = urllib.request.Request(
+              url, data=data,
+              headers={
+                  "Authorization": f"Basic {auth}",
+                  "Accept": "application/json",
+                  "Content-Type": "application/json",
+              },
+              method="PUT",
+          )
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  resp.read()
+              print(f"Reassigned {issue} to reviewer accountId {reviewer}")
+          except Exception as e:
+              print(f"WARNING: Failed to reassign {issue}: {e}")
+          PYEOF
+
+      # ── Step 8b: Transition JIRA issue to Code Review ──────────────
+      # When the agent pushes code changes, move the ticket from
+      # "In Progress" to "Code Review" so the reviewer knows to look.
+      - name: Transition JIRA issue to Code Review
+        if: success() && steps.code-changes.outputs.changed == 'true'
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY: ${{ github.event.inputs.issue_key || env.ISSUE_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import base64, json, os, sys, urllib.request
+
+          base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+          issue = os.environ.get("ISSUE_KEY")
+          email = os.environ.get("JIRA_USER_EMAIL")
+          token = os.environ.get("JIRA_API_TOKEN")
+          target_name = "Code Review"
+
+          if not base or not issue or not email or not token:
+              print("Missing JIRA config; skipping transition.")
+              sys.exit(0)
+
+          def call(method, url, data=None):
+              auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+              headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
+              if data is not None:
+                  headers["Content-Type"] = "application/json"
+                  data = json.dumps(data).encode()
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read().decode() or "{}")
+
+          try:
+              transitions = call("GET", f"{base}/rest/api/3/issue/{issue}/transitions").get("transitions", [])
+          except Exception as e:
+              print(f"WARNING: Failed to fetch transitions: {e}")
+              sys.exit(0)
+
+          match = None
+          for t in transitions:
+              if (t.get("name") or "").lower() == target_name.lower():
+                  match = t
+                  break
+
+          if not match:
+              print(f"No '{target_name}' transition available from current status; skipping.")
+              sys.exit(0)
+
+          try:
+              call("POST", f"{base}/rest/api/3/issue/{issue}/transitions", {"transition": {"id": match.get("id")}})
+              print(f"Transitioned {issue} to {target_name}.")
+          except Exception as e:
+              print(f"WARNING: Failed to transition {issue}: {e}")
+          PYEOF
+
+      # ── Step 8c: Request PR review from reviewer ───────────────────
+      # When code changes are pushed, (re-)request a review from the
+      # JIRA reviewer on the PR. Idempotent — safe to run even if the
+      # reviewer was already requested during PR creation.
+      - name: Request PR review from reviewer
+        if: success() && steps.code-changes.outputs.changed == 'true' && env.REVIEWER_GH != ''
+        env:
+          GH_TOKEN: ${{ secrets.GIT_PAT }}
+          GH_REPO: ${{ github.repository }}
+          REVIEWER_GH: ${{ env.REVIEWER_GH }}
+        run: |
+          BRANCH=$(git branch --show-current)
+          PR_NUM=$(gh pr list --repo "$GH_REPO" --head "$BRANCH" --json number -q '.[0].number' 2>/dev/null || echo "")
+          if [[ -n "$PR_NUM" ]]; then
+            gh pr edit "$PR_NUM" --repo "$GH_REPO" --add-reviewer "$REVIEWER_GH" \
+              && echo "Requested review from $REVIEWER_GH on PR #$PR_NUM" \
+              || echo "WARNING: Failed to request review on PR #$PR_NUM"
+          else
+            echo "WARNING: No PR found for branch $BRANCH; skipping review request."
+          fi
+
+      # ── Step 9: Validate field metadata matches JIRA specs ───────────
+      # Post-agent safety net: verifies that any generated field metadata
+      # XML files match the field specifications from the JIRA description.
+      - name: Validate field metadata matches JIRA specs
+        if: success()
+        env:
+          ISSUE_KEY: ${{ github.event.inputs.issue_key || env.ISSUE_KEY }}
+          ISSUE_DESCRIPTION: ${{ env.ISSUE_DESCRIPTION }}
+        run: python3 scripts/validate_field_specs.py
