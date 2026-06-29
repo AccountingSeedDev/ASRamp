@@ -56,6 +56,7 @@ export default class RampHome extends NavigationMixin(LightningElement) {
     @track schedFreq = 'HOURLY';
     @track schedHour = '1';
     @track schedBusy = false;
+    @track refreshing = false;
     @track availability = {};   // pipelineId → "available to sync in Ramp" (live callout, e.g. "12" / "100+")
     @track conn = null;         // live connection status (real Ramp API call); null until first load
     wiredResult;
@@ -117,7 +118,7 @@ export default class RampHome extends NavigationMixin(LightningElement) {
     get connTitle() { return this.conn ? this.conn.detail : 'Checking connection to Ramp…'; }
     get anyBusy() { return Object.values(this.busy).some(Boolean); }
     get syncAllLabel() { return this.anyBusy ? 'Syncing…' : 'Sync all now'; }
-    get syncAllDisabled() { return !this.setupComplete || this.anyBusy; }
+    get syncAllDisabled() { return !this.connected || this.anyBusy; }
     get progressStyle() { return `width:${this.donePct}%`; }
     get ringStyle() {
         const p = this.donePct;
@@ -233,7 +234,7 @@ export default class RampHome extends NavigationMixin(LightningElement) {
                     { key: 'f', n: this._n(p.failed), label: 'Failed', cls: p.failed ? 'cn bad' : 'cn muted' }
                 ],
                 showSync: p.implemented && !!p.action,
-                syncDisabled: busy || !this.setupComplete,
+                syncDisabled: busy || !this.connected,
                 syncLabel: busy ? 'Syncing' : 'Sync now',
                 notEnabled: !p.implemented,
                 hasLastRun: !!p.lastRun,
@@ -324,7 +325,14 @@ export default class RampHome extends NavigationMixin(LightningElement) {
         this._run('bill', 'syncBill');
         this._run('reimb', 'syncReimb');
     }
-    handleRefresh() { refreshApex(this.wiredResult); this.loadAvailability(); this.loadConnection(); }
+    handleRefresh() {
+        this.refreshing = true;
+        const p = this.wiredResult ? refreshApex(this.wiredResult) : Promise.resolve();
+        p.finally(() => { this.refreshing = false; });
+        this.loadAvailability();
+        this.loadConnection();
+    }
+    get refreshLabel() { return this.refreshing ? 'Refreshing…' : 'Refresh'; }
 
     // ── scheduler actions ──
     openSchedule(e) {

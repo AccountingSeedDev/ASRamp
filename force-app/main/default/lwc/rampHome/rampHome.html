@@ -22,9 +22,9 @@
                     <div class="conn-sub">{business}</div>
                 </div>
             </div>
-            <button class="btn btn-neutral" onclick={handleRefresh}>
+            <button class="btn btn-neutral" onclick={handleRefresh} disabled={refreshing}>
                 <lightning-icon icon-name="utility:refresh" size="x-small" alternative-text="Refresh"></lightning-icon>
-                <span>Refresh</span>
+                <span>{refreshLabel}</span>
             </button>
             <button class="btn btn-neutral" data-tab="authorization" onclick={openConfig}>
                 <lightning-icon icon-name="utility:settings" size="x-small" alternative-text="Configure"></lightning-icon>
