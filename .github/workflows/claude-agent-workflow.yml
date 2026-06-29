@@ -152,12 +152,29 @@ jobs:
           echo "Checkout target: $REF (type: $BRANCH_TYPE)"
 
       # ── Step 2: Checkout the determined branch ────────────────────────
-      # CLAUDE.md, prompts/, and mcp-servers.json come from this branch.
+      # CLAUDE.md (developer-customizable conventions) comes from THIS branch.
+      # The workflow-owned files (scripts/, prompts/, mcp-servers.json) are
+      # overlaid from the default branch in Step 2b so they don't have to be
+      # replicated onto every feature/integration branch.
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.target-branch.outputs.ref }}
           token: ${{ secrets.GIT_PAT }}
           persist-credentials: true
+
+      # ── Step 2b: Overlay workflow-owned files from the default branch ──
+      # scripts/, prompts/, and mcp-servers.json are centrally owned (their
+      # headers say "Do not modify in feature branches"). Pull them from
+      # 'main' so the agent always runs the current DevOps-approved versions,
+      # regardless of what the checked-out target branch contains. They are
+      # left in the working tree for this run but unstaged so the agent never
+      # commits them onto the feature branch.
+      - name: Overlay workflow-owned files from default branch
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=1
+          git checkout origin/main -- scripts prompts mcp-servers.json
+          git reset -q HEAD -- scripts prompts mcp-servers.json || true
 
       # ── Step 3: Install tooling ───────────────────────────────────────
       - name: Set up Node.js
