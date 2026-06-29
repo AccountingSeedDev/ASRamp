@@ -224,38 +224,57 @@ public with sharing class RampConfigurationController {
      */
     private static Map<String, String> getFieldNameToRampIdMap() {
         Map<String, String> fieldMap = new Map<String, String>();
+        String nextPage = null;
 
         try {
-            HttpResponse res = RampAPIService.get('/developer/v1/accounting/fields');
+            do {
+                String endpoint = '/developer/v1/accounting/fields';
+                if (String.isNotBlank(nextPage)) {
+                    endpoint += '?start=' + nextPage;
+                }
 
-            if (res.getStatusCode() == 200) {
+                HttpResponse res = RampAPIService.get(endpoint);
+
+                if (res.getStatusCode() != 200) {
+                    System.debug('Error fetching accounting fields page: ' + res.getStatusCode() + ' - ' + res.getBody());
+                    break;
+                }
+
                 Object parsed = JSON.deserializeUntyped(res.getBody());
                 List<Object> fields;
 
                 if (parsed instanceof List<Object>) {
                     fields = (List<Object>) parsed;
+                    nextPage = null;
                 } else if (parsed instanceof Map<String, Object>) {
                     Map<String, Object> responseMap = (Map<String, Object>) parsed;
                     fields = responseMap.containsKey('data')
                         ? (List<Object>) responseMap.get('data')
                         : new List<Object>();
+
+                    if (responseMap.containsKey('page')) {
+                        Map<String, Object> page = (Map<String, Object>) responseMap.get('page');
+                        nextPage = (String) page.get('next');
+                    } else {
+                        nextPage = null;
+                    }
                 } else {
                     fields = new List<Object>();
+                    nextPage = null;
                 }
 
                 for (Object field : fields) {
-                    Map<String, Object> fieldMap2 = (Map<String, Object>) field;
-                    // Only include active fields
-                    Object isActive = fieldMap2.get('is_active');
+                    Map<String, Object> fieldData = (Map<String, Object>) field;
+                    Object isActive = fieldData.get('is_active');
                     if (isActive == null || isActive == true) {
-                        String name = (String) fieldMap2.get('name');
-                        String rampId = (String) fieldMap2.get('ramp_id');
+                        String name = (String) fieldData.get('name');
+                        String rampId = (String) fieldData.get('ramp_id');
                         if (String.isNotBlank(name) && String.isNotBlank(rampId)) {
                             fieldMap.put(name, rampId);
                         }
                     }
                 }
-            }
+            } while (String.isNotBlank(nextPage));
         } catch (Exception e) {
             System.debug('Error getting field map: ' + e.getMessage());
         }
@@ -332,39 +351,54 @@ public with sharing class RampConfigurationController {
     @AuraEnabled(cacheable=false)
     public static List<Map<String, Object>> getRampCustomFields() {
         try {
-            HttpResponse res = RampAPIService.get('/developer/v1/accounting/fields');
+            List<Map<String, Object>> result = new List<Map<String, Object>>();
+            String nextPage = null;
 
-            if (res.getStatusCode() == 200) {
+            do {
+                String endpoint = '/developer/v1/accounting/fields';
+                if (String.isNotBlank(nextPage)) {
+                    endpoint += '?start=' + nextPage;
+                }
+
+                HttpResponse res = RampAPIService.get(endpoint);
+
+                if (res.getStatusCode() != 200) {
+                    throw new AuraHandledException('Failed to retrieve custom fields. Status: ' + res.getStatusCode());
+                }
+
                 Object parsed = JSON.deserializeUntyped(res.getBody());
 
-                // Handle both array and object with 'data' key
                 List<Object> fields;
                 if (parsed instanceof List<Object>) {
                     fields = (List<Object>) parsed;
+                    nextPage = null;
                 } else if (parsed instanceof Map<String, Object>) {
                     Map<String, Object> responseMap = (Map<String, Object>) parsed;
-                    if (responseMap.containsKey('data')) {
-                        fields = (List<Object>) responseMap.get('data');
+                    fields = responseMap.containsKey('data')
+                        ? (List<Object>) responseMap.get('data')
+                        : new List<Object>();
+
+                    if (responseMap.containsKey('page')) {
+                        Map<String, Object> page = (Map<String, Object>) responseMap.get('page');
+                        nextPage = (String) page.get('next');
                     } else {
-                        fields = new List<Object>();
+                        nextPage = null;
                     }
                 } else {
                     fields = new List<Object>();
+                    nextPage = null;
                 }
 
-                List<Map<String, Object>> result = new List<Map<String, Object>>();
                 for (Object field : fields) {
-                    Map<String, Object> fieldMap = (Map<String, Object>) field;
-                    // Filter out soft-deleted fields (is_active = false)
-                    Object isActive = fieldMap.get('is_active');
+                    Map<String, Object> fieldData = (Map<String, Object>) field;
+                    Object isActive = fieldData.get('is_active');
                     if (isActive == null || isActive == true) {
-                        result.add(fieldMap);
+                        result.add(fieldData);
                     }
                 }
-                return result;
-            } else {
-                throw new AuraHandledException('Failed to retrieve custom fields. Status: ' + res.getStatusCode());
-            }
+            } while (String.isNotBlank(nextPage));
+
+            return result;
         } catch (Exception e) {
             throw new AuraHandledException('Error retrieving custom fields: ' + e.getMessage());
         }

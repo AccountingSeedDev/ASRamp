@@ -490,4 +490,84 @@ private class RampConfigurationControllerTest {
             return res;
         }
     }
+
+    @IsTest
+    static void testSyncAccountingVariables_PaginatedFields() {
+        insert new AcctSeed__Accounting_Variable__c(
+            Name = 'Test Variable 4',
+            AcctSeed__Type__c = 'GL Account Variable 4',
+            AcctSeed__Active__c = true
+        );
+
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, new RampFieldsPaginatedMock());
+        String result = RampConfigurationController.syncAccountingVariables();
+        Test.stopTest();
+
+        System.assertNotEquals(null, result, 'Result should not be null');
+        System.assert(result.contains('Sync job started'),
+            'Batch should start even when fields span multiple API pages: ' + result);
+    }
+
+    @IsTest
+    static void testGetRampCustomFields_PaginatedResponse() {
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, new RampFieldsPaginatedMock());
+        List<Map<String, Object>> result = RampConfigurationController.getRampCustomFields();
+        Test.stopTest();
+
+        System.assertNotEquals(null, result, 'Result should not be null');
+        System.assertEquals(2, result.size(),
+            'Should collect fields from both pages; got: ' + result.size());
+    }
+
+    /**
+     * @description Two-page mock for /accounting/fields. Page 1 returns GL Variable 1
+     * with a non-empty cursor; page 2 returns GL Variable 4 with an empty-string cursor
+     * to verify that String.isNotBlank terminates the loop correctly.
+     */
+    private class RampFieldsPaginatedMock implements HttpCalloutMock {
+        private Integer callCount = 0;
+
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000}');
+                return res;
+            }
+
+            if (req.getEndpoint().contains('/accounting/connection')) {
+                res.setStatusCode(200);
+                res.setBody('{"id":"connection-123","remote_provider_name":"ACCOUNTING_SEED"}');
+                return res;
+            }
+
+            if (req.getEndpoint().contains('/accounting/field-options')) {
+                res.setStatusCode(200);
+                res.setBody('{"data":[],"page":{"next":null}}');
+                return res;
+            }
+
+            if (req.getEndpoint().contains('/accounting/fields')) {
+                callCount++;
+                if (callCount == 1) {
+                    // First page — includes a non-empty cursor so the loop continues
+                    res.setStatusCode(200);
+                    res.setBody('{"data":[{"name":"GL Account Variable 1","ramp_id":"ramp-field-1","is_active":true}],"page":{"next":"cursor-abc"}}');
+                } else {
+                    // Second page — empty-string cursor signals end of pages
+                    res.setStatusCode(200);
+                    res.setBody('{"data":[{"name":"GL Account Variable 4","ramp_id":"ramp-field-4","is_active":true}],"page":{"next":""}}');
+                }
+                return res;
+            }
+
+            res.setStatusCode(200);
+            res.setBody('{}');
+            return res;
+        }
+    }
 }
