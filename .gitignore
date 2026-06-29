@@ -70,4 +70,8 @@ target/
 
 screenshots/
 
-scripts/
+# Local-only script artifacts (the agent's scripts/*.py and *.sh ARE tracked —
+# the workflow runs them, so do not blanket-ignore scripts/)
+scripts/.env
+scripts/*.log
+scripts/__pycache__/
