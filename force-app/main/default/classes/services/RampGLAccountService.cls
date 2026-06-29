@@ -314,6 +314,16 @@ public with sharing class RampGLAccountService {
         return stats;
     }
 
+    public static List<AcctSeed__GL_Account__c> getUnsyncedGLAccounts() {
+        return [
+            SELECT Id, Name
+            FROM AcctSeed__GL_Account__c
+            WHERE AcctSeed__Active__c = true
+            AND Ramp_Id__c = null
+            ORDER BY Name
+        ];
+    }
+
     /**
      * @description Custom exception for GL Account sync errors
      */

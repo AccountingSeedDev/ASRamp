@@ -475,6 +475,51 @@ private class RampConfigurationControllerTest {
         System.assert(true);
     }
 
+    @IsTest
+    static void getUnsyncedGLAccounts_returnsSomeAccounts() {
+        TestDataFactory.getInstance().initialize();
+        User admin = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(admin) {
+            List<AcctSeed__GL_Account__c> activeGLs = [
+                SELECT Id FROM AcctSeed__GL_Account__c WHERE AcctSeed__Active__c = true
+            ];
+            System.assert(activeGLs.size() > 0, 'TestDataFactory should create active GL Accounts');
+
+            activeGLs[0].Ramp_Id__c = 'ramp_test_id';
+            update activeGLs[0];
+
+            Test.startTest();
+            List<AcctSeed__GL_Account__c> result = RampConfigurationController.getUnsyncedGLAccounts();
+            Test.stopTest();
+
+            System.assertNotEquals(null, result, 'Result should not be null');
+            System.assertEquals(activeGLs.size() - 1, result.size(), 'Should exclude the synced account');
+        }
+    }
+
+    @IsTest
+    static void getUnsyncedGLAccounts_returnsEmptyWhenAllSynced() {
+        TestDataFactory.getInstance().initialize();
+        User admin = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(admin) {
+            List<AcctSeed__GL_Account__c> activeGLs = [
+                SELECT Id FROM AcctSeed__GL_Account__c WHERE AcctSeed__Active__c = true
+            ];
+            for (AcctSeed__GL_Account__c gl : activeGLs) {
+                gl.Ramp_Id__c = 'ramp_' + gl.Id;
+            }
+            update activeGLs;
+
+            Test.startTest();
+            List<AcctSeed__GL_Account__c> result = RampConfigurationController.getUnsyncedGLAccounts();
+            Test.stopTest();
+
+            System.assert(result.isEmpty(), 'Should return empty list when all accounts are synced');
+        }
+    }
+
     /** Mock that always returns an empty page — used by syncTransactions_returnsJobId. */
     private class EmptyPageMock implements HttpCalloutMock {
         public HttpResponse respond(HttpRequest req) {

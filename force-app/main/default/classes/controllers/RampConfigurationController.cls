@@ -148,6 +148,15 @@ public with sharing class RampConfigurationController {
         }
     }
 
+    @AuraEnabled(cacheable=true)
+    public static List<AcctSeed__GL_Account__c> getUnsyncedGLAccounts() {
+        try {
+            return RampGLAccountService.getUnsyncedGLAccounts();
+        } catch (Exception e) {
+            throw new AuraHandledException('Error getting unsynced GL Accounts: ' + e.getMessage());
+        }
+    }
+
     /**
      * @description Creates the GL Account Variable 1-4 custom fields in Ramp
      * @return String Summary of field creation results
