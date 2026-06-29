@@ -307,9 +307,14 @@ public with sharing class RampConfigurationController {
             String scopes = strVal(credential, 'scopes');
             Boolean isActive = credential.get('isActive') == true;
 
-            // Clear the cached token — once the new credential lands, the next
-            // API call should re-OAuth using the updated client id/secret.
-            RampAuthService.clearCachedToken();
+            // Clear the cached token so the next API call re-OAuth's with the new
+            // client id/secret. Swallow any "no credential" error — this is a
+            // first-time save and there is nothing cached yet.
+            try {
+                RampAuthService.clearCachedToken();
+            } catch (Exception ignoreNoCredential) {
+                // No cached token to clear on an initial save.
+            }
 
             // Deploy the CMDT record from a Queueable so the metadata deployment
             // runs async and doesn't block the save round-trip. Skip in tests
