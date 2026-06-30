@@ -402,7 +402,12 @@ private class RampConfigurationControllerTest {
         }
 
         Test.startTest();
-        Map<String, Integer> stats = RampConfigurationController.getTransactionSyncStats();
+        Map<String, Integer> stats;
+        // Controller runs in default context; run as the admin (granted Ramp_Admin
+        // FLS in initialize) so its SOQL on the Ramp_* fields is permitted.
+        System.runAs(admin) {
+            stats = RampConfigurationController.getTransactionSyncStats();
+        }
         Test.stopTest();
 
         System.assertEquals(1, stats.get('pending'));
@@ -437,7 +442,12 @@ private class RampConfigurationControllerTest {
         }
 
         Test.startTest();
-        List<Map<String, Object>> rows = RampConfigurationController.getRecentTransactionFailures();
+        List<Map<String, Object>> rows;
+        // Controller runs in default context; run as the admin (granted Ramp_Admin
+        // FLS in initialize) so its SOQL on the Ramp_* fields is permitted.
+        System.runAs(admin) {
+            rows = RampConfigurationController.getRecentTransactionFailures();
+        }
         Test.stopTest();
 
         System.assertEquals(1, rows.size());
@@ -568,44 +578,57 @@ private class RampConfigurationControllerTest {
 
     /**
      * @description Two-page mock for /accounting/fields. Page 1 returns GL Variable 1
-     * with a non-empty cursor; page 2 returns GL Variable 4 with an empty-string cursor
-     * to verify that String.isNotBlank terminates the loop correctly.
+     * and a page.next that is the COMPLETE next-page URL (as the real Ramp API returns —
+     * see docs.ramp.com pagination), embedding the keyset cursor. Page 2 (requested only
+     * when the caller correctly extracts that cursor into the start param) returns
+     * GL Variable 4 with an empty-string cursor to verify loop termination.
+     *
+     * If the caller passes the whole next URL as start (the old bug) the second request's
+     * start param is the URL, not PAGE2_CURSOR, so this mock returns HTTP 400 and the
+     * pagination tests fail — exactly the regression this guards against.
      */
     private class RampFieldsPaginatedMock implements HttpCalloutMock {
-        private Integer callCount = 0;
+        private final String page2Cursor = 'PAGE2CURSOR';
 
         public HttpResponse respond(HttpRequest req) {
             HttpResponse res = new HttpResponse();
             res.setHeader('Content-Type', 'application/json');
+            String endpoint = req.getEndpoint();
 
-            if (req.getEndpoint().contains('/token')) {
+            if (endpoint.contains('/token')) {
                 res.setStatusCode(200);
                 res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000}');
                 return res;
             }
 
-            if (req.getEndpoint().contains('/accounting/connection')) {
+            if (endpoint.contains('/accounting/connection')) {
                 res.setStatusCode(200);
                 res.setBody('{"id":"connection-123","remote_provider_name":"ACCOUNTING_SEED"}');
                 return res;
             }
 
-            if (req.getEndpoint().contains('/accounting/field-options')) {
+            if (endpoint.contains('/accounting/field-options')) {
                 res.setStatusCode(200);
                 res.setBody('{"data":[],"page":{"next":null}}');
                 return res;
             }
 
-            if (req.getEndpoint().contains('/accounting/fields')) {
-                callCount++;
-                if (callCount == 1) {
-                    // First page — includes a non-empty cursor so the loop continues
-                    res.setStatusCode(200);
-                    res.setBody('{"data":[{"name":"GL Account Variable 1","ramp_id":"ramp-field-1","is_active":true}],"page":{"next":"cursor-abc"}}');
+            if (endpoint.contains('/accounting/fields')) {
+                if (endpoint.contains('start=')) {
+                    // Subsequent page: only honor the correctly-extracted cursor.
+                    if (endpoint.contains('start=' + page2Cursor)) {
+                        res.setStatusCode(200);
+                        res.setBody('{"data":[{"name":"GL Account Variable 4","ramp_id":"ramp-field-4","is_active":true}],"page":{"next":""}}');
+                    } else {
+                        // The full next URL was passed as the cursor — reject it.
+                        res.setStatusCode(400);
+                        res.setBody('{"error":"invalid start cursor"}');
+                    }
                 } else {
-                    // Second page — empty-string cursor signals end of pages
+                    // First page: page.next is the complete URL of page 2 (Ramp's real shape).
                     res.setStatusCode(200);
-                    res.setBody('{"data":[{"name":"GL Account Variable 4","ramp_id":"ramp-field-4","is_active":true}],"page":{"next":""}}');
+                    res.setBody('{"data":[{"name":"GL Account Variable 1","ramp_id":"ramp-field-1","is_active":true}],' +
+                        '"page":{"next":"https://api.ramp.com/developer/v1/accounting/fields?start=' + page2Cursor + '&page_size=100"}}');
                 }
                 return res;
             }

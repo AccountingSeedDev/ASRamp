@@ -11,6 +11,11 @@ private class RampVendorSyncBatchTest {
 
     @TestSetup
     static void setup() {
+        // Builds the AcctSeedSysAdmin user and grants it Ramp_Admin (FLS on the
+        // Ramp_* fields). Tests run the batch as this user so its SOQL/DML on
+        // Ramp_Vendor_Id__c is permitted.
+        TestDataFactory.getInstance().initialize();
+
         // Create test Accounts
         List<Account> accounts = new List<Account>();
 
@@ -43,18 +48,24 @@ private class RampVendorSyncBatchTest {
             AcctSeed__Accounting_Type__c = 'Customer'
         ));
 
-        insert accounts;
+        // Insert as the admin so the Ramp_Vendor_Id__c write is permitted.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert accounts;
+        }
     }
 
     @IsTest
     static void testBatchExecution_Success() {
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampVendorMockSuccess());
+        Id jobId;
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            Test.startTest();
+            Test.setMock(HttpCalloutMock.class, new RampVendorMockSuccess());
 
-        RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
-        Id jobId = Database.executeBatch(batch, 10);
+            RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
+            jobId = Database.executeBatch(batch, 10);
 
-        Test.stopTest();
+            Test.stopTest();
+        }
 
         // Verify batch completed
         AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
@@ -63,13 +74,16 @@ private class RampVendorSyncBatchTest {
 
     @IsTest
     static void testBatchExecution_NoConnectionId() {
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampVendorMockNoConnection());
+        Id jobId;
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            Test.startTest();
+            Test.setMock(HttpCalloutMock.class, new RampVendorMockNoConnection());
 
-        RampVendorSyncBatch batch = new RampVendorSyncBatch();
-        Id jobId = Database.executeBatch(batch, 10);
+            RampVendorSyncBatch batch = new RampVendorSyncBatch();
+            jobId = Database.executeBatch(batch, 10);
 
-        Test.stopTest();
+            Test.stopTest();
+        }
 
         // Batch should complete but with errors logged
         AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
@@ -81,44 +95,50 @@ private class RampVendorSyncBatchTest {
         // Simulates post-tenant-switch / post-clear: Ramp already has every
         // vendor (keyed by SF Id) but local Ramp_Vendor_Id__c is null on the
         // create-bucket Accounts. Batch should re-stamp them without POSTing.
-        List<Account> creatableVendors = [
-            SELECT Id FROM Account
-            WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
-              AND Ramp_Vendor_Id__c = null
-        ];
-        System.assert(creatableVendors.size() > 0, 'Setup expects at least one Account with null Ramp_Vendor_Id__c');
-
         Set<String> sfIds = new Set<String>();
-        for (Account a : creatableVendors) sfIds.add(a.Id);
+        Id jobId;
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            List<Account> creatableVendors = [
+                SELECT Id FROM Account
+                WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
+                  AND Ramp_Vendor_Id__c = null
+            ];
+            System.assert(creatableVendors.size() > 0, 'Setup expects at least one Account with null Ramp_Vendor_Id__c');
 
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampVendorMockAllExist(sfIds));
+            for (Account a : creatableVendors) sfIds.add(a.Id);
 
-        RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
-        Id jobId = Database.executeBatch(batch, 10);
+            Test.startTest();
+            Test.setMock(HttpCalloutMock.class, new RampVendorMockAllExist(sfIds));
 
-        Test.stopTest();
+            RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
+            jobId = Database.executeBatch(batch, 10);
 
-        AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
-        System.assertEquals('Completed', job.Status, 'Batch should complete');
+            Test.stopTest();
 
-        // Every previously-null Account should now have Ramp_Vendor_Id__c populated.
-        Integer stillNull = [
-            SELECT COUNT() FROM Account
-            WHERE Id IN :sfIds AND Ramp_Vendor_Id__c = null
-        ];
-        System.assertEquals(0, stillNull, 'All matched vendors should be re-stamped');
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete');
+
+            // Every previously-null Account should now have Ramp_Vendor_Id__c populated.
+            Integer stillNull = [
+                SELECT COUNT() FROM Account
+                WHERE Id IN :sfIds AND Ramp_Vendor_Id__c = null
+            ];
+            System.assertEquals(0, stillNull, 'All matched vendors should be re-stamped');
+        }
     }
 
     @IsTest
     static void testBatchExecution_ApiError() {
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampVendorMockError());
+        Id jobId;
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            Test.startTest();
+            Test.setMock(HttpCalloutMock.class, new RampVendorMockError());
 
-        RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
-        Id jobId = Database.executeBatch(batch, 10);
+            RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
+            jobId = Database.executeBatch(batch, 10);
 
-        Test.stopTest();
+            Test.stopTest();
+        }
 
         // Batch should complete but with errors
         AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
@@ -130,29 +150,31 @@ private class RampVendorSyncBatchTest {
         // Issue #1: Verifies that having a Restore record AND Update records in the
         // same batch chunk does NOT cause the "uncommitted work pending" callout error.
         // The batch must process callouts (PATCH for updates) before DML (restore stamp).
-        List<Account> creatableVendors = [
-            SELECT Id FROM Account
-            WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
-              AND Ramp_Vendor_Id__c = null
-        ];
-        System.assert(creatableVendors.size() > 0, 'Setup expects accounts without Ramp ID');
         Set<String> sfIds = new Set<String>();
-        for (Account a : creatableVendors) sfIds.add(a.Id);
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            List<Account> creatableVendors = [
+                SELECT Id FROM Account
+                WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
+                  AND Ramp_Vendor_Id__c = null
+            ];
+            System.assert(creatableVendors.size() > 0, 'Setup expects accounts without Ramp ID');
+            for (Account a : creatableVendors) sfIds.add(a.Id);
 
-        Test.startTest();
-        // Mock: GET returns the creatable vendors as existing (triggers restore path),
-        //       PATCH succeeds (for the pre-stamped vendor).
-        Test.setMock(HttpCalloutMock.class, new RampVendorMockRestoreAndUpdate(sfIds));
-        RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
-        Id jobId = Database.executeBatch(batch, 200); // large chunk = all in one execute()
-        Test.stopTest();
+            Test.startTest();
+            // Mock: GET returns the creatable vendors as existing (triggers restore path),
+            //       PATCH succeeds (for the pre-stamped vendor).
+            Test.setMock(HttpCalloutMock.class, new RampVendorMockRestoreAndUpdate(sfIds));
+            RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
+            Id jobId = Database.executeBatch(batch, 200); // large chunk = all in one execute()
+            Test.stopTest();
 
-        AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
-        System.assertEquals('Completed', job.Status, 'Batch should complete');
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete');
 
-        // The formerly-null vendors should be re-stamped (restore path succeeded).
-        Integer stillNull = [SELECT COUNT() FROM Account WHERE Id IN :sfIds AND Ramp_Vendor_Id__c = null];
-        System.assertEquals(0, stillNull, 'Restored vendors should be stamped');
+            // The formerly-null vendors should be re-stamped (restore path succeeded).
+            Integer stillNull = [SELECT COUNT() FROM Account WHERE Id IN :sfIds AND Ramp_Vendor_Id__c = null];
+            System.assertEquals(0, stillNull, 'Restored vendors should be stamped');
+        }
     }
 
     @IsTest

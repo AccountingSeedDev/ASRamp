@@ -5,6 +5,13 @@
 @IsTest
 private class RampSyncScheduleTest {
 
+    @TestSetup
+    static void setup() {
+        // Builds the AcctSeedSysAdmin user with Ramp_Admin so the schedulable
+        // dispatch (which queries Ramp_* fields) can run as that user.
+        TestDataFactory.getInstance().initialize();
+    }
+
     private static Integer triggerCount(String pid) {
         String namePattern = 'Ramp Sync - ' + pid + '%';
         return [SELECT COUNT() FROM CronTrigger WHERE CronJobDetail.Name LIKE :namePattern];
@@ -49,13 +56,17 @@ private class RampSyncScheduleTest {
     static void schedulable_executeDispatchesAllPipelines() {
         // Not wrapped in start/stop — the enqueued queueables stay queued (never
         // run), so no callouts fire; this just covers the dispatch branches.
-        new RampSyncSchedulable(RampSyncSchedulable.PIPE_MASTER).execute(null);
-        new RampSyncSchedulable(RampSyncSchedulable.PIPE_GL).execute(null);
-        new RampSyncSchedulable(RampSyncSchedulable.PIPE_VAR).execute(null);
-        new RampSyncSchedulable(RampSyncSchedulable.PIPE_VENDOR).execute(null);
-        new RampSyncSchedulable(RampSyncSchedulable.PIPE_TXN).execute(null);
-        new RampSyncSchedulable(RampSyncSchedulable.PIPE_BILL).execute(null);
-        new RampSyncSchedulable(RampSyncSchedulable.PIPE_REIMB).execute(null);
+        // Run as the admin (granted Ramp_Admin FLS) since the vendor pipeline's
+        // batch start() query references Account.Ramp_Vendor_Id__c.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            new RampSyncSchedulable(RampSyncSchedulable.PIPE_MASTER).execute(null);
+            new RampSyncSchedulable(RampSyncSchedulable.PIPE_GL).execute(null);
+            new RampSyncSchedulable(RampSyncSchedulable.PIPE_VAR).execute(null);
+            new RampSyncSchedulable(RampSyncSchedulable.PIPE_VENDOR).execute(null);
+            new RampSyncSchedulable(RampSyncSchedulable.PIPE_TXN).execute(null);
+            new RampSyncSchedulable(RampSyncSchedulable.PIPE_BILL).execute(null);
+            new RampSyncSchedulable(RampSyncSchedulable.PIPE_REIMB).execute(null);
+        }
         Integer queued = [SELECT COUNT() FROM AsyncApexJob WHERE JobType = 'Queueable'];
         System.assert(queued >= 0, 'execute ran without error');
     }
