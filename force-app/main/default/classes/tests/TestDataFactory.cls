@@ -36,6 +36,12 @@ public without sharing class TestDataFactory {
             this.ledgers = (List<AcctSeed__Ledger__c>) testData.get('ledgers');
             // Get Accounting Settings
             this.accountingSettings = (List<AcctSeed__Accounting_Settings__c>) testData.get('accountingSettings');
+            // Grant the AcctSeed admin (the user every test runs FLS-sensitive work
+            // as, via System.runAs) FLS on the Ramp_* fields. This user is created
+            // fresh per test transaction, so the assignment is contention-free —
+            // unlike assigning to the shared running user, which deadlocks parallel
+            // test runs (UNABLE_TO_LOCK_ROW).
+            assignRampAdminTo(this.getAdminUser().Id);
             // Create Accounts
             this.createAccounts();
         }
@@ -157,6 +163,34 @@ public without sharing class TestDataFactory {
 
             if (existingPermissionSetAssignments.isEmpty()) {
                 insert permissionSetAssignment;
+            }
+        }
+    }
+
+    /**
+     * @description Idempotently assigns the package's Ramp_Admin permission set —
+     * which grants FLS on the Ramp_* fields added to the AcctSeed managed objects —
+     * to the given user. Without it a user has no visibility to those fields and any
+     * SOQL/DML referencing them fails ("No such column" / "fields inaccessible").
+     *
+     * Static and context-independent so it can also be called from a @TestSetup in
+     * classes that don't build full AcctSeed test data. The PermissionSetAssignment
+     * insert runs inside System.runAs to isolate the setup-object DML and avoid a
+     * MIXED_DML error with any non-setup DML in the same transaction.
+     *
+     * Grant the RUNNING user from @TestSetup so the assignment is committed before
+     * the test-method transaction, where default-context code (controllers, batch
+     * execution) needs the FLS.
+     */
+    public static void assignRampAdminTo(Id userId) {
+        PermissionSet ps = [SELECT Id FROM PermissionSet WHERE Name = 'Ramp_Admin' LIMIT 1];
+        Integer alreadyAssigned = [
+            SELECT COUNT() FROM PermissionSetAssignment
+            WHERE AssigneeId = :userId AND PermissionSetId = :ps.Id
+        ];
+        if (alreadyAssigned == 0) {
+            System.runAs(new User(Id = UserInfo.getUserId())) {
+                insert new PermissionSetAssignment(AssigneeId = userId, PermissionSetId = ps.Id);
             }
         }
     }

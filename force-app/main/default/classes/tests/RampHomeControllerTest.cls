@@ -13,38 +13,42 @@ private class RampHomeControllerTest {
 
     @IsTest
     static void getHomeData_buildsPipelinesAndJobMetrics() {
-        insert new AcctSeed__Automated_Job_Results__c(
-            AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_CARD_SYNC,
-            AcctSeed__Processed__c = 10, AcctSeed__Succeeded__c = 8, AcctSeed__Failed__c = 2
-        );
+        // getHomeData queries the Ramp_* fields (vendor counts, transaction sync
+        // status), so run as the admin granted Ramp_Admin FLS in initialize.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_CARD_SYNC,
+                AcctSeed__Processed__c = 10, AcctSeed__Succeeded__c = 8, AcctSeed__Failed__c = 2
+            );
 
-        Test.startTest();
-        RampHomeController.HomeData d = RampHomeController.getHomeData();
-        Test.stopTest();
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
 
-        System.assertEquals(6, d.pipelines.size(), 'gl + var + vendor + txn + bill + reimb');
-        Boolean reimbImplemented = false;
-        Boolean billImplemented = false;
-        for (RampHomeController.Pipeline p : d.pipelines) {
-            if (p.id == 'reimb') reimbImplemented = p.implemented;
-            if (p.id == 'bill') billImplemented = p.implemented;
-        }
-        System.assert(reimbImplemented, 'reimbursement pipeline is live');
-        System.assert(billImplemented, 'bill pipeline is live');
-
-        // Automated Job Results feed the metrics (3 transaction + 3 master jobs).
-        System.assertEquals(6, d.jobs.size());
-        System.assert(d.recordsProcessed >= 10, 'recordsProcessed sourced from AJR');
-        Boolean cardSeen = false;
-        for (RampHomeController.JobMetric j : d.jobs) {
-            if (j.label == 'Card transactions') {
-                cardSeen = true;
-                System.assertEquals(10, j.processed);
-                System.assertEquals(2, j.failed);
-                System.assertEquals('errors', j.statusKind);
+            System.assertEquals(6, d.pipelines.size(), 'gl + var + vendor + txn + bill + reimb');
+            Boolean reimbImplemented = false;
+            Boolean billImplemented = false;
+            for (RampHomeController.Pipeline p : d.pipelines) {
+                if (p.id == 'reimb') reimbImplemented = p.implemented;
+                if (p.id == 'bill') billImplemented = p.implemented;
             }
+            System.assert(reimbImplemented, 'reimbursement pipeline is live');
+            System.assert(billImplemented, 'bill pipeline is live');
+
+            // Automated Job Results feed the metrics (3 transaction + 3 master jobs).
+            System.assertEquals(6, d.jobs.size());
+            System.assert(d.recordsProcessed >= 10, 'recordsProcessed sourced from AJR');
+            Boolean cardSeen = false;
+            for (RampHomeController.JobMetric j : d.jobs) {
+                if (j.label == 'Card transactions') {
+                    cardSeen = true;
+                    System.assertEquals(10, j.processed);
+                    System.assertEquals(2, j.failed);
+                    System.assertEquals('errors', j.statusKind);
+                }
+            }
+            System.assert(cardSeen, 'card job metric present');
         }
-        System.assert(cardSeen, 'card job metric present');
     }
 
     @IsTest

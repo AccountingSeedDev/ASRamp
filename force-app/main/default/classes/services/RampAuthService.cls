@@ -128,13 +128,30 @@ public with sharing class RampAuthService {
 
         req.setBody(body);
 
+        // Send, retrying once on a transient server-side error (5xx) or transport
+        // failure. Ramp's auth gateway occasionally returns a 502/503 that succeeds
+        // on an immediate retry; without this a brief blip fails sync records.
         Http http = new Http();
-        HttpResponse res;
+        HttpResponse res = null;
+        RampAuthException transportError = null;
 
-        try {
-            res = http.send(req);
-        } catch (Exception e) {
-            throw new RampAuthException('Failed to send OAuth request: ' + e.getMessage(), e);
+        for (Integer attempt = 0; attempt < 2; attempt++) {
+            try {
+                res = http.send(req);
+            } catch (Exception e) {
+                transportError = new RampAuthException('Failed to send OAuth request: ' + e.getMessage(), e);
+                res = null;
+                continue; // retry a transport failure once
+            }
+            if (res.getStatusCode() < 500) {
+                break; // success or a non-retryable (4xx) response — stop retrying
+            }
+            // 5xx — loop to retry, or exit after the final attempt
+        }
+
+        if (res == null) {
+            // Both attempts threw before any response came back.
+            throw transportError;
         }
 
         if (res.getStatusCode() == 200) {
@@ -146,12 +163,40 @@ public with sharing class RampAuthService {
             } catch (Exception e) {
                 throw new RampAuthException('Failed to parse token response: ' + e.getMessage(), e);
             }
-        } else {
-            throw new RampAuthException(
-                'OAuth request failed with status ' + res.getStatusCode() +
-                ': ' + res.getBody()
-            );
         }
+
+        throw new RampAuthException(
+            'OAuth request failed with status ' + res.getStatusCode() +
+            ': ' + describeAuthFailure(res)
+        );
+    }
+
+    /**
+     * @description Produces a concise, human-readable reason from an OAuth error
+     * response — never the raw body. Ramp's gateway returns a full HTML page on a
+     * 5xx, which would otherwise be dumped verbatim into the sync error queue.
+     * @param res The non-200 OAuth HTTP response
+     * @return A clean, human-readable error detail
+     */
+    @TestVisible
+    private static String describeAuthFailure(HttpResponse res) {
+        Integer statusCode = res.getStatusCode();
+        if (statusCode >= 500) {
+            return 'Ramp\'s authentication endpoint is temporarily unavailable. Please retry shortly.';
+        }
+        String body = res.getBody();
+        if (String.isBlank(body) || body.trim().startsWith('<')) {
+            return 'HTTP ' + statusCode + ' from Ramp auth endpoint (no JSON detail available).';
+        }
+        try {
+            Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(body);
+            if (parsed.containsKey('error_description')) return String.valueOf(parsed.get('error_description'));
+            if (parsed.containsKey('error')) return String.valueOf(parsed.get('error'));
+            if (parsed.containsKey('message')) return String.valueOf(parsed.get('message'));
+        } catch (Exception e) {
+            // Not valid JSON — fall through to the truncated body below.
+        }
+        return body.length() > 300 ? body.substring(0, 300) + '...' : body;
     }
 
     /**

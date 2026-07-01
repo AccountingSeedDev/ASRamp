@@ -135,6 +135,74 @@ private class RampAuthServiceTest {
     }
 
     @IsTest
+    static void testRequestAccessToken_RetriesOnTransient5xx() {
+        Ramp_Credential__mdt mockCredential = new Ramp_Credential__mdt(
+            Client_ID__c = 'test_client_id',
+            Client_Secret__c = 'test_client_secret',
+            Token_URL__c = 'https://api.ramp.com/oauth/token',
+            Scopes__c = 'transactions:read',
+            DeveloperName = 'Test_Credential'
+        );
+
+        // First call 502s (transient gateway error), retry succeeds.
+        Test.setMock(HttpCalloutMock.class, new RampAuth5xxThenSuccessMock());
+
+        Test.startTest();
+        RampTokenResponse response = RampAuthService.requestAccessToken(mockCredential);
+        Test.stopTest();
+
+        System.assert(response.isValid(), 'Should recover on retry after a transient 502');
+        System.assertEquals('recovered_token', response.access_token,
+            'Should return the token from the successful retry');
+    }
+
+    @IsTest
+    static void testRequestAccessToken_5xxErrorIsCleanNoHtml() {
+        Ramp_Credential__mdt mockCredential = new Ramp_Credential__mdt(
+            Client_ID__c = 'test_client_id',
+            Client_Secret__c = 'test_client_secret',
+            Token_URL__c = 'https://api.ramp.com/oauth/token',
+            Scopes__c = 'transactions:read',
+            DeveloperName = 'Test_Credential'
+        );
+
+        // Persistent 502 with an HTML body — must not leak raw HTML into the error.
+        Test.setMock(HttpCalloutMock.class, new RampAuth5xxHtmlMock());
+
+        Test.startTest();
+        try {
+            RampAuthService.requestAccessToken(mockCredential);
+            System.assert(false, 'Expected RampAuthException to be thrown');
+        } catch (RampAuthService.RampAuthException e) {
+            System.assert(!e.getMessage().contains('<'),
+                'Error must not contain raw HTML: ' + e.getMessage());
+            System.assert(e.getMessage().contains('502'), 'Should mention the status code');
+            System.assert(e.getMessage().contains('temporarily unavailable'),
+                'Should give a readable reason: ' + e.getMessage());
+        }
+        Test.stopTest();
+    }
+
+    @IsTest
+    static void testDescribeAuthFailure_JsonErrorDescription() {
+        HttpResponse res = new HttpResponse();
+        res.setStatusCode(400);
+        res.setBody('{"error":"invalid_scope","error_description":"requested scope not allowed"}');
+        System.assertEquals('requested scope not allowed',
+            RampAuthService.describeAuthFailure(res), 'Should surface error_description');
+    }
+
+    @IsTest
+    static void testDescribeAuthFailure_4xxHtmlBodyNotLeaked() {
+        HttpResponse res = new HttpResponse();
+        res.setStatusCode(400);
+        res.setBody('<html><body>nope</body></html>');
+        String detail = RampAuthService.describeAuthFailure(res);
+        System.assert(!detail.contains('<'), 'No raw HTML: ' + detail);
+        System.assert(detail.contains('400'), 'Mentions status code: ' + detail);
+    }
+
+    @IsTest
     static void testTokenResponse_ExpirationDateTime() {
         RampTokenResponse response = new RampTokenResponse();
         response.expires_in = 3600; // 1 hour
@@ -187,6 +255,46 @@ private class RampAuthServiceTest {
             res.setStatusCode(401);
             res.setHeader('Content-Type', 'application/json');
             res.setBody('{"error": "invalid_client"}');
+            return res;
+        }
+    }
+
+    /**
+     * @description Returns a transient 502 (HTML body) on the first call, then a
+     * valid token — exercises the retry-once-on-5xx path.
+     */
+    private class RampAuth5xxThenSuccessMock implements HttpCalloutMock {
+        private Integer calls = 0;
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            calls++;
+            if (calls == 1) {
+                res.setStatusCode(502);
+                res.setHeader('Content-Type', 'text/html');
+                res.setBody('<!DOCTYPE html><html><title>502 Bad Gateway</title></html>');
+            } else {
+                res.setStatusCode(200);
+                res.setHeader('Content-Type', 'application/json');
+                res.setBody(JSON.serialize(new Map<String, Object>{
+                    'access_token' => 'recovered_token',
+                    'token_type' => 'Bearer',
+                    'expires_in' => 864000
+                }));
+            }
+            return res;
+        }
+    }
+
+    /**
+     * @description Always returns a 502 with an HTML gateway page — verifies the
+     * raw HTML never reaches the error message.
+     */
+    private class RampAuth5xxHtmlMock implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setStatusCode(502);
+            res.setHeader('Content-Type', 'text/html');
+            res.setBody('<!DOCTYPE html><html lang=en><title>| 502: Bad gateway</title><body>Bad gateway</body></html>');
             return res;
         }
     }

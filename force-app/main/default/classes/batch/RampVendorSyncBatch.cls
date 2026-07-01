@@ -1,7 +1,12 @@
 /**
- * @description Batch job to sync Accounts (Vendors) to Ramp accounting vendors
- * Creates new vendors or updates existing ones based on Ramp_Vendor_Id__c
- * Designed to run on a schedule for ongoing synchronization
+ * @description Batch job to sync Accounts (Vendors) to Ramp accounting vendors.
+ * Creates new vendors or updates existing ones based on Ramp_Vendor_Id__c.
+ * Designed to run on a schedule for ongoing synchronization.
+ *
+ * Callout/DML ordering: all HTTP callouts are completed before any DML within
+ * each execute() invocation, satisfying the Salesforce "no callout after DML"
+ * rule. This prevents the "uncommitted work pending" error when a Restore record
+ * (DML) and Update records (callout) land in the same batch chunk.
  */
 public class RampVendorSyncBatch implements Database.Batchable<SObject>, Database.AllowsCallouts, Database.Stateful {
 
@@ -50,7 +55,9 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
     }
 
     /**
-     * @description Execute method - process each batch of accounts
+     * @description Execute method - process each batch of accounts.
+     * All callouts are issued before any DML to comply with the Salesforce
+     * "no callout after uncommitted work" restriction.
      */
     public void execute(Database.BatchableContext bc, List<Account> scope) {
         if (String.isBlank(accountingConnectionId)) {
@@ -91,16 +98,9 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
             }
         }
 
-        // Restamp locally — no callouts.
-        if (!toRestore.isEmpty()) {
-            try {
-                update toRestore;
-                restoredCount += toRestore.size();
-            } catch (Exception e) {
-                errorCount++;
-                errors.add('Restore batch: ' + e.getMessage());
-            }
-        }
+        // ── All callouts first ──────────────────────────────────────────────
+        // Salesforce requires all callouts to precede any DML within a
+        // transaction. Restore records only need DML (re-stamp), so they wait.
 
         // PATCH existing records.
         for (Account acc : toUpdate) {
@@ -113,14 +113,37 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
             }
         }
 
-        // POST genuinely-new ones.
+        // createVendorsAndReturnStamped does POST + GET callouts and returns
+        // the Account records to stamp — DML happens below after all callouts.
+        List<Account> newlyStamped = new List<Account>();
         if (!toCreate.isEmpty()) {
             try {
-                createVendors(toCreate);
+                newlyStamped = createVendorsAndReturnStamped(toCreate);
                 createdCount += toCreate.size();
             } catch (Exception e) {
                 errorCount++;
                 errors.add('Create batch: ' + e.getMessage());
+            }
+        }
+
+        // ── DML after all callouts ──────────────────────────────────────────
+
+        if (!toRestore.isEmpty()) {
+            try {
+                update toRestore;
+                restoredCount += toRestore.size();
+            } catch (Exception e) {
+                errorCount++;
+                errors.add('Restore batch: ' + e.getMessage());
+            }
+        }
+
+        if (!newlyStamped.isEmpty()) {
+            try {
+                update newlyStamped;
+            } catch (Exception e) {
+                errorCount++;
+                errors.add('Stamp new vendors: ' + e.getMessage());
             }
         }
     }
@@ -208,17 +231,16 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
     }
 
     /**
-     * @description Updates an existing vendor in Ramp via PATCH
+     * @description Updates an existing vendor in Ramp via PATCH.
+     * Always sends the code field so that cleared AccountNumber values are
+     * reflected in Ramp (omitting the field would leave the old value in place).
      * @param acc The Account to update
      */
     private void updateVendor(Account acc) {
         Map<String, Object> requestBody = new Map<String, Object>{
-            'name' => acc.Name
+            'name' => acc.Name,
+            'code' => String.isBlank(acc.AccountNumber) ? null : acc.AccountNumber
         };
-
-        if (String.isNotBlank(acc.AccountNumber)) {
-            requestBody.put('code', acc.AccountNumber);
-        }
 
         String body = JSON.serialize(requestBody);
         String endpoint = '/developer/v1/accounting/vendors/' + acc.Ramp_Vendor_Id__c;
@@ -227,29 +249,29 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
 
         if (res.getStatusCode() != 200) {
             throw new RampVendorSyncException(
-                'PATCH failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
+                'PATCH failed. Status: ' + res.getStatusCode() + ', Response: ' + extractErrorDetail(res)
             );
         }
     }
 
     /**
-     * @description Creates new vendors in Ramp via batch POST
+     * @description POSTs the new vendors to Ramp, then GETs the list to retrieve
+     * their ramp_ids. Returns the Account records populated with Ramp_Vendor_Id__c
+     * ready for a single DML update after all callouts complete.
      * @param accounts List of Accounts to create as vendors
+     * @return List of Account records stamped with Ramp_Vendor_Id__c (no DML performed)
      */
-    private void createVendors(List<Account> accounts) {
-        // Build vendors array
+    private List<Account> createVendorsAndReturnStamped(List<Account> accounts) {
         List<Map<String, Object>> vendors = new List<Map<String, Object>>();
 
         for (Account acc : accounts) {
             Map<String, Object> vendor = new Map<String, Object>{
-                'id' => acc.Id,  // Use SF ID as the vendor ID
+                'id' => acc.Id,
                 'name' => acc.Name
             };
-
             if (String.isNotBlank(acc.AccountNumber)) {
                 vendor.put('code', acc.AccountNumber);
             }
-
             vendors.add(vendor);
         }
 
@@ -261,28 +283,27 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
         String body = JSON.serialize(requestBody);
         HttpResponse res = RampAPIService.post('/developer/v1/accounting/vendors', body);
 
-        if (res.getStatusCode() == 200 || res.getStatusCode() == 201) {
-            // Fetch the created vendors to get ramp_ids
-            fetchAndUpdateRampIds(accounts);
-        } else {
+        if (res.getStatusCode() != 200 && res.getStatusCode() != 201) {
             throw new RampVendorSyncException(
-                'POST failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
+                'POST failed. Status: ' + res.getStatusCode() + ', Response: ' + extractErrorDetail(res)
             );
         }
+
+        return buildStampList(accounts);
     }
 
     /**
-     * @description Fetches vendors from Ramp and updates Account records with ramp_ids
-     * @param accounts The accounts that were created
+     * @description GETs all vendors from Ramp and returns Account records stamped
+     * with ramp_id values for those that match our SF Ids. Pure callout — no DML.
+     * @param accounts The accounts that were just created via POST
+     * @return List of Account records with Ramp_Vendor_Id__c populated
      */
-    private void fetchAndUpdateRampIds(List<Account> accounts) {
-        // Build set of SF IDs we're looking for
+    private List<Account> buildStampList(List<Account> accounts) {
         Set<String> sfIds = new Set<String>();
         for (Account acc : accounts) {
             sfIds.add(acc.Id);
         }
 
-        // Fetch vendors from Ramp and build id -> ramp_id map
         Map<String, String> sfIdToRampId = new Map<String, String>();
         String nextPage = null;
 
@@ -303,15 +324,12 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
                         Map<String, Object> vendorMap = (Map<String, Object>) v;
                         String vendorId = (String) vendorMap.get('id');
                         String rampId = (String) vendorMap.get('ramp_id');
-
-                        // Only process if this is one of our accounts
                         if (sfIds.contains(vendorId) && String.isNotBlank(rampId)) {
                             sfIdToRampId.put(vendorId, rampId);
                         }
                     }
                 }
 
-                // Check for pagination
                 if (response.containsKey('page')) {
                     Map<String, Object> page = (Map<String, Object>) response.get('page');
                     nextPage = (String) page.get('next');
@@ -324,21 +342,40 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
             }
         } while (nextPage != null && sfIdToRampId.size() < sfIds.size());
 
-        // Update Account records with Ramp IDs
-        List<Account> toUpdateRecords = new List<Account>();
+        List<Account> toStamp = new List<Account>();
         for (Account acc : accounts) {
             String rampId = sfIdToRampId.get(acc.Id);
             if (String.isNotBlank(rampId)) {
-                toUpdateRecords.add(new Account(
-                    Id = acc.Id,
-                    Ramp_Vendor_Id__c = rampId
-                ));
+                toStamp.add(new Account(Id = acc.Id, Ramp_Vendor_Id__c = rampId));
             }
         }
+        return toStamp;
+    }
 
-        if (!toUpdateRecords.isEmpty()) {
-            update toUpdateRecords;
+    /**
+     * @description Extracts a human-readable error detail from an HTTP response.
+     * Avoids surfacing raw HTML (e.g., a Ramp 404 page) in error messages.
+     * @param res The HTTP response from Ramp
+     * @return A clean, human-readable error string
+     */
+    @TestVisible
+    private static String extractErrorDetail(HttpResponse res) {
+        Integer statusCode = res.getStatusCode();
+        if (statusCode == 404) {
+            return 'Vendor not found in Ramp (HTTP 404). The Ramp_Vendor_Id__c may be invalid or the vendor was deleted in Ramp.';
         }
+        String responseBody = res.getBody();
+        if (String.isBlank(responseBody) || responseBody.trim().startsWith('<')) {
+            return 'HTTP ' + statusCode + ' error from Ramp (no JSON detail available).';
+        }
+        try {
+            Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(responseBody);
+            if (parsed.containsKey('error')) return String.valueOf(parsed.get('error'));
+            if (parsed.containsKey('message')) return String.valueOf(parsed.get('message'));
+        } catch (Exception e) {
+            // Not valid JSON — fall through to truncated body below.
+        }
+        return responseBody.length() > 500 ? responseBody.substring(0, 500) + '...' : responseBody;
     }
 
     /**

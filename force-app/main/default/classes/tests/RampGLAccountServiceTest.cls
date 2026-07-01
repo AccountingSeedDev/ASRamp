@@ -287,6 +287,49 @@ private class RampGLAccountServiceTest {
         }
     }
 
+    @IsTest
+    static void testGetUnsyncedGLAccounts_SomeUnsynced() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            List<AcctSeed__GL_Account__c> activeGLs = [
+                SELECT Id FROM AcctSeed__GL_Account__c WHERE AcctSeed__Active__c = true
+            ];
+            System.assert(activeGLs.size() > 0, 'TestDataFactory should create active GL Accounts');
+
+            activeGLs[0].Ramp_Id__c = 'ramp_test_id';
+            update activeGLs[0];
+
+            Test.startTest();
+            List<AcctSeed__GL_Account__c> result = RampGLAccountService.getUnsyncedGLAccounts();
+            Test.stopTest();
+
+            System.assertEquals(activeGLs.size() - 1, result.size(),
+                'Should exclude the one synced GL Account');
+        }
+    }
+
+    @IsTest
+    static void testGetUnsyncedGLAccounts_AllSynced() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            List<AcctSeed__GL_Account__c> activeGLs = [
+                SELECT Id FROM AcctSeed__GL_Account__c WHERE AcctSeed__Active__c = true
+            ];
+            for (AcctSeed__GL_Account__c gl : activeGLs) {
+                gl.Ramp_Id__c = 'ramp_' + gl.Id;
+            }
+            update activeGLs;
+
+            Test.startTest();
+            List<AcctSeed__GL_Account__c> result = RampGLAccountService.getUnsyncedGLAccounts();
+            Test.stopTest();
+
+            System.assert(result.isEmpty(), 'Should return empty list when all GL Accounts are synced');
+        }
+    }
+
     /**
      * @description Mock that fails the POST. The pre-flight GET still returns
      * empty so we reach the POST step where the failure occurs.

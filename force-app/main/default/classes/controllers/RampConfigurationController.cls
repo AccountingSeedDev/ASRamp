@@ -1,4 +1,4 @@
-/**
+        /**
  * @description Controller for Ramp Configuration Lightning Component
  */
 public with sharing class RampConfigurationController {
@@ -148,6 +148,15 @@ public with sharing class RampConfigurationController {
         }
     }
 
+    @AuraEnabled(cacheable=true)
+    public static List<AcctSeed__GL_Account__c> getUnsyncedGLAccounts() {
+        try {
+            return RampGLAccountService.getUnsyncedGLAccounts();
+        } catch (Exception e) {
+            throw new AuraHandledException('Error getting unsynced GL Accounts: ' + e.getMessage());
+        }
+    }
+
     /**
      * @description Creates the GL Account Variable 1-4 custom fields in Ramp
      * @return String Summary of field creation results
@@ -224,43 +233,76 @@ public with sharing class RampConfigurationController {
      */
     private static Map<String, String> getFieldNameToRampIdMap() {
         Map<String, String> fieldMap = new Map<String, String>();
+        String nextPage = null;
 
         try {
-            HttpResponse res = RampAPIService.get('/developer/v1/accounting/fields');
+            do {
+                String endpoint = '/developer/v1/accounting/fields';
+                if (String.isNotBlank(nextPage)) {
+                    endpoint += '?start=' + EncodingUtil.urlEncode(nextPage, 'UTF-8');
+                }
 
-            if (res.getStatusCode() == 200) {
+                HttpResponse res = RampAPIService.get(endpoint);
+
+                if (res.getStatusCode() != 200) {
+                    System.debug('Error fetching accounting fields page: ' + res.getStatusCode() + ' - ' + res.getBody());
+                    break;
+                }
+
                 Object parsed = JSON.deserializeUntyped(res.getBody());
                 List<Object> fields;
 
                 if (parsed instanceof List<Object>) {
                     fields = (List<Object>) parsed;
+                    nextPage = null;
                 } else if (parsed instanceof Map<String, Object>) {
                     Map<String, Object> responseMap = (Map<String, Object>) parsed;
                     fields = responseMap.containsKey('data')
                         ? (List<Object>) responseMap.get('data')
                         : new List<Object>();
+                    nextPage = extractNextCursor(responseMap);
                 } else {
                     fields = new List<Object>();
+                    nextPage = null;
                 }
 
                 for (Object field : fields) {
-                    Map<String, Object> fieldMap2 = (Map<String, Object>) field;
-                    // Only include active fields
-                    Object isActive = fieldMap2.get('is_active');
+                    Map<String, Object> fieldData = (Map<String, Object>) field;
+                    Object isActive = fieldData.get('is_active');
                     if (isActive == null || isActive == true) {
-                        String name = (String) fieldMap2.get('name');
-                        String rampId = (String) fieldMap2.get('ramp_id');
+                        String name = (String) fieldData.get('name');
+                        String rampId = (String) fieldData.get('ramp_id');
                         if (String.isNotBlank(name) && String.isNotBlank(rampId)) {
                             fieldMap.put(name, rampId);
                         }
                     }
                 }
-            }
+            } while (String.isNotBlank(nextPage));
         } catch (Exception e) {
             System.debug('Error getting field map: ' + e.getMessage());
         }
 
         return fieldMap;
+    }
+
+    /**
+     * @description Pulls the keyset cursor out of Ramp's page.next URL. Ramp
+     * returns the complete URL of the next page (e.g. ".../fields?start=<cursor>"),
+     * so the cursor must be extracted rather than used as-is.
+     * @param responseMap The parsed JSON body of a paginated Ramp response
+     * @return String The start cursor for the next page, or null if there is none
+     */
+    private static String extractNextCursor(Map<String, Object> responseMap) {
+        Object pageObj = responseMap.get('page');
+        if (!(pageObj instanceof Map<String, Object>)) return null;
+        String nextUrl = (String) ((Map<String, Object>) pageObj).get('next');
+        if (String.isBlank(nextUrl)) return null;
+        Integer i = nextUrl.indexOf('start=');
+        if (i < 0) return null;
+        String cursor = nextUrl.substring(i + 6);
+        Integer amp = cursor.indexOf('&');
+        if (amp >= 0) cursor = cursor.substring(0, amp);
+        return cursor;
     }
 
     /**
@@ -298,9 +340,14 @@ public with sharing class RampConfigurationController {
             String scopes = strVal(credential, 'scopes');
             Boolean isActive = credential.get('isActive') == true;
 
-            // Clear the cached token — once the new credential lands, the next
-            // API call should re-OAuth using the updated client id/secret.
-            RampAuthService.clearCachedToken();
+            // Clear the cached token so the next API call re-OAuth's with the new
+            // client id/secret. Swallow any "no credential" error — this is a
+            // first-time save and there is nothing cached yet.
+            try {
+                RampAuthService.clearCachedToken();
+            } catch (Exception ignoreNoCredential) {
+                // No cached token to clear on an initial save.
+            }
 
             // Deploy the CMDT record from a Queueable so the metadata deployment
             // runs async and doesn't block the save round-trip. Skip in tests
@@ -332,39 +379,48 @@ public with sharing class RampConfigurationController {
     @AuraEnabled(cacheable=false)
     public static List<Map<String, Object>> getRampCustomFields() {
         try {
-            HttpResponse res = RampAPIService.get('/developer/v1/accounting/fields');
+            List<Map<String, Object>> result = new List<Map<String, Object>>();
+            String nextPage = null;
 
-            if (res.getStatusCode() == 200) {
+            do {
+                String endpoint = '/developer/v1/accounting/fields';
+                if (String.isNotBlank(nextPage)) {
+                    endpoint += '?start=' + EncodingUtil.urlEncode(nextPage, 'UTF-8');
+                }
+
+                HttpResponse res = RampAPIService.get(endpoint);
+
+                if (res.getStatusCode() != 200) {
+                    throw new AuraHandledException('Failed to retrieve custom fields. Status: ' + res.getStatusCode());
+                }
+
                 Object parsed = JSON.deserializeUntyped(res.getBody());
 
-                // Handle both array and object with 'data' key
                 List<Object> fields;
                 if (parsed instanceof List<Object>) {
                     fields = (List<Object>) parsed;
+                    nextPage = null;
                 } else if (parsed instanceof Map<String, Object>) {
                     Map<String, Object> responseMap = (Map<String, Object>) parsed;
-                    if (responseMap.containsKey('data')) {
-                        fields = (List<Object>) responseMap.get('data');
-                    } else {
-                        fields = new List<Object>();
-                    }
+                    fields = responseMap.containsKey('data')
+                        ? (List<Object>) responseMap.get('data')
+                        : new List<Object>();
+                    nextPage = extractNextCursor(responseMap);
                 } else {
                     fields = new List<Object>();
+                    nextPage = null;
                 }
 
-                List<Map<String, Object>> result = new List<Map<String, Object>>();
                 for (Object field : fields) {
-                    Map<String, Object> fieldMap = (Map<String, Object>) field;
-                    // Filter out soft-deleted fields (is_active = false)
-                    Object isActive = fieldMap.get('is_active');
+                    Map<String, Object> fieldData = (Map<String, Object>) field;
+                    Object isActive = fieldData.get('is_active');
                     if (isActive == null || isActive == true) {
-                        result.add(fieldMap);
+                        result.add(fieldData);
                     }
                 }
-                return result;
-            } else {
-                throw new AuraHandledException('Failed to retrieve custom fields. Status: ' + res.getStatusCode());
-            }
+            } while (String.isNotBlank(nextPage));
+
+            return result;
         } catch (Exception e) {
             throw new AuraHandledException('Error retrieving custom fields: ' + e.getMessage());
         }
