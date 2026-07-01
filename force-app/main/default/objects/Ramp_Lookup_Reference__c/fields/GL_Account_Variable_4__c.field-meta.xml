@@ -9,4 +9,15 @@
     <required>false</required>
     <deleteConstraint>SetNull</deleteConstraint>
     <type>Lookup</type>
+    <lookupFilter>
+        <active>true</active>
+        <errorMessage>Select a GL Account Variable of type &quot;GL Account Variable 4&quot;.</errorMessage>
+        <filterItems>
+            <field>AcctSeed__Accounting_Variable__c.AcctSeed__Type__c</field>
+            <operation>equals</operation>
+            <value>GL Account Variable 4</value>
+        </filterItems>
+        <infoMessage>Only GL Account Variable 4 records are shown.</infoMessage>
+        <isOptional>false</isOptional>
+    </lookupFilter>
 </CustomField>
