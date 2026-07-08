@@ -136,6 +136,22 @@ public with sharing class RampReimbursementService {
             }
         }
 
+        // Mark DML-failed payables synchronously so the error queue can surface them.
+        List<AcctSeed__Account_Payable__c> toFail = new List<AcctSeed__Account_Payable__c>();
+        for (RampReimbursementBuilder.ReimbursementBuild rb : build.successful) {
+            if (rb.header.Id == null) continue;
+            String failReason = lineFailure.get(rb.reimbursementId);
+            if (failReason == null) failReason = cdFailure.get(rb.reimbursementId);
+            if (failReason != null) {
+                toFail.add(new AcctSeed__Account_Payable__c(
+                    Id = rb.header.Id,
+                    Ramp_Sync_Status__c = 'Failed',
+                    Ramp_Sync_Error__c = truncate(failReason, 1000)
+                ));
+            }
+        }
+        if (!toFail.isEmpty()) Database.update(toFail, false);
+
         if ((!okSyncs.isEmpty() || !failSyncs.isEmpty()) && RampSyncSettingsService.getSendSyncAck()) {
             postAckAsync(JSON.serialize(okSyncs), JSON.serialize(failSyncs),
                 JSON.serialize(new List<Id>(payableIdsToFlip)), JSON.serialize(new List<Id>(cdIdsToFlip)));
