@@ -46,6 +46,25 @@ public with sharing class RampSyncSettingsService {
             return cachedSettings;
         }
 
+        // Prefer the org-level override (NamespacePrefix = null) over the packaged
+        // default (NamespacePrefix = 'AcctSeedRamp'). When both share DeveloperName
+        // 'Default', LIMIT 1 without an ORDER BY clause can resolve to either row,
+        // so we query explicitly for the org override first.
+        List<Ramp_Sync_Settings__mdt> orgOverride = [
+            SELECT Default_Ledger__c, Default_JE_Status__c, Sync_Grouping__c, Send_Sync_Ack__c,
+                   Vendor_Match_Requires_Payment_History__c,
+                   Enable_Reference_Lookup__c, Reference_Key_Template__c
+            FROM Ramp_Sync_Settings__mdt
+            WHERE DeveloperName = 'Default'
+              AND NamespacePrefix = null
+            LIMIT 1
+        ];
+
+        if (!orgOverride.isEmpty()) {
+            cachedSettings = orgOverride[0];
+            return cachedSettings;
+        }
+
         List<Ramp_Sync_Settings__mdt> records = [
             SELECT Default_Ledger__c, Default_JE_Status__c, Sync_Grouping__c, Send_Sync_Ack__c,
                    Vendor_Match_Requires_Payment_History__c,

@@ -186,12 +186,19 @@ export default class RampConfiguration extends LightningElement {
         ];
     }
 
-    @wire(getReferenceLookupConfig)
-    wiredReferenceLookup({ data }) {
-        if (data) {
-            this.referenceLookupEnabled = data.enabled === true;
-            this.referenceKeyTemplate = data.template || '';
-        }
+    connectedCallback() {
+        this.loadReferenceLookupConfig();
+    }
+
+    loadReferenceLookupConfig() {
+        getReferenceLookupConfig()
+            .then(data => {
+                this.referenceLookupEnabled = data.enabled === true;
+                this.referenceKeyTemplate = data.template || '';
+            })
+            .catch(error => {
+                console.error('Error loading reference lookup config:', error);
+            });
     }
 
     handleReferenceEnabledChange(event) {
