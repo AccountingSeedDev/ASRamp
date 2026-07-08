@@ -175,11 +175,11 @@ public with sharing class RampReimbursementBuilder {
                 ReimbLineItem li = r.line_items[i];
                 Decimal amt = (li.amount != null) ? li.amount.toDecimal() : null;
                 if (amt == null) throw new BuildException('Line item ' + i + ' has no amount');
-                rb.lines.add(buildLine(r, li.accounting_field_selections, amt, li.memo, i, glByUuid, varByUuid, suspenseGLId));
+                rb.lines.add(buildLine(r, li.accounting_field_selections, amt, li.memo, i, txnDate, glByUuid, varByUuid, suspenseGLId));
             }
         } else {
             if (r.amount == null) throw new BuildException('Reimbursement has no amount and no line items');
-            rb.lines.add(buildLine(r, r.accounting_field_selections, r.amount, r.memo, 0, glByUuid, varByUuid, suspenseGLId));
+            rb.lines.add(buildLine(r, r.accounting_field_selections, r.amount, r.memo, 0, txnDate, glByUuid, varByUuid, suspenseGLId));
         }
 
         // Reimbursed → Ramp already paid the employee: clear the payable.
@@ -219,13 +219,14 @@ public with sharing class RampReimbursementBuilder {
     }
 
     private static AcctSeed__Account_Payable_Line__c buildLine(
-        Reimbursement r, List<ReimbFieldSelection> lineSelections, Decimal amount, String memo, Integer ordinal,
+        Reimbursement r, List<ReimbFieldSelection> lineSelections, Decimal amount, String memo, Integer ordinal, Date txnDate,
         Map<String, Id> glByUuid, Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Id suspenseGLId
     ) {
         AcctSeed__Account_Payable_Line__c line = new AcctSeed__Account_Payable_Line__c();
         line.AcctSeed__ExtId__c = r.id + ':L' + ordinal;
         line.AcctSeed__Description__c = String.isNotBlank(memo) ? memo : r.memo;
         line.AcctSeed__Amount__c = amount;
+        line.AcctSeed__Date__c = txnDate;
 
         String glUuid = findSelectionId(lineSelections, 'GL_ACCOUNT');
         if (String.isBlank(glUuid)) glUuid = findSelectionId(r.accounting_field_selections, 'GL_ACCOUNT');
@@ -249,11 +250,15 @@ public with sharing class RampReimbursementBuilder {
         if (selections == null) return;
         for (ReimbFieldSelection sel : selections) {
             if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
-            String t = varByUuid.get(sel.id).AcctSeed__Type__c;
-            if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = varByUuid.get(sel.id).Id;
-            else if (t == 'GL Account Variable 2' && line.AcctSeed__GL_Account_Variable_2__c == null) line.AcctSeed__GL_Account_Variable_2__c = varByUuid.get(sel.id).Id;
-            else if (t == 'GL Account Variable 3' && line.AcctSeed__GL_Account_Variable_3__c == null) line.AcctSeed__GL_Account_Variable_3__c = varByUuid.get(sel.id).Id;
-            else if (t == 'GL Account Variable 4' && line.AcctSeed__GL_Account_Variable_4__c == null) line.AcctSeed__GL_Account_Variable_4__c = varByUuid.get(sel.id).Id;
+            AcctSeed__Accounting_Variable__c v = varByUuid.get(sel.id);
+            if (!v.AcctSeed__Active__c) {
+                throw new BuildException('GL Variable "' + (sel.name != null ? sel.name : sel.id) + '" (option id: ' + sel.id + ') has been deleted in Accounting Seed and cannot be used for coding.');
+            }
+            String t = v.AcctSeed__Type__c;
+            if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = v.Id;
+            else if (t == 'GL Account Variable 2' && line.AcctSeed__GL_Account_Variable_2__c == null) line.AcctSeed__GL_Account_Variable_2__c = v.Id;
+            else if (t == 'GL Account Variable 3' && line.AcctSeed__GL_Account_Variable_3__c == null) line.AcctSeed__GL_Account_Variable_3__c = v.Id;
+            else if (t == 'GL Account Variable 4' && line.AcctSeed__GL_Account_Variable_4__c == null) line.AcctSeed__GL_Account_Variable_4__c = v.Id;
         }
     }
 
@@ -287,7 +292,7 @@ public with sharing class RampReimbursementBuilder {
     private static Map<String, AcctSeed__Accounting_Variable__c> resolveVariables(Set<String> uuids) {
         Map<String, AcctSeed__Accounting_Variable__c> result = new Map<String, AcctSeed__Accounting_Variable__c>();
         if (uuids.isEmpty()) return result;
-        for (AcctSeed__Accounting_Variable__c v : [SELECT Id, AcctSeed__Type__c, Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c WHERE Ramp_Field_Option_Id__c IN :uuids AND AcctSeed__Active__c = true]) {
+        for (AcctSeed__Accounting_Variable__c v : [SELECT Id, AcctSeed__Type__c, AcctSeed__Active__c, Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c WHERE Ramp_Field_Option_Id__c IN :uuids]) {
             result.put(v.Ramp_Field_Option_Id__c, v);
         }
         return result;

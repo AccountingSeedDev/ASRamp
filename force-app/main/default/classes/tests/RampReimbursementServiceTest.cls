@@ -105,4 +105,44 @@ private class RampReimbursementServiceTest {
         };
         return JSON.serialize(new Map<String, Object>{ 'data' => new List<Object>{ reimb }, 'page' => new Map<String, Object>{ 'next' => null } });
     }
+
+    @IsTest
+    static void syncPage_reimbursed_createsBatchWithCorrectName() {
+        String email = configureForSync();
+        Date payDate = [SELECT AcctSeed__Start_Date__c FROM AcctSeed__Accounting_Period__c WHERE AcctSeed__Status__c = 'Open' ORDER BY AcctSeed__Start_Date__c DESC LIMIT 1].AcctSeed__Start_Date__c;
+        Test.setMock(HttpCalloutMock.class, new ReimbursedMock(email, payDate));
+
+        Test.startTest();
+        RampReimbursementService.PageResult r = RampReimbursementService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(1, r.payablesCreated, 'Errors: ' + r.errorMessages);
+        System.assertEquals(1, r.cashDisbursementsCreated, 'Errors: ' + r.errorMessages);
+        List<AcctSeed__Cash_Disbursement_Batch__c> batches = [SELECT Name FROM AcctSeed__Cash_Disbursement_Batch__c WHERE AcctSeed__ExtId__c LIKE 'RAMP-REIMB:%'];
+        System.assertEquals(1, batches.size(), 'One batch should be created');
+        System.assertEquals('Ramp Reimbursement ' + String.valueOf(payDate), batches[0].Name, 'Batch name must follow naming convention');
+    }
+
+    private class ReimbursedMock extends BaseMock {
+        private String email;
+        private Date payDate;
+        public ReimbursedMock(String e, Date d) { this.email = e; this.payDate = d; }
+        protected override HttpResponse api(HttpRequest req, HttpResponse res) {
+            if (req.getEndpoint().contains('/reimbursements')) { res.setStatusCode(200); res.setBody(reimbursedJson(email, payDate)); }
+            else if (req.getEndpoint().contains('/accounting/syncs')) { res.setStatusCode(201); res.setBody('{"id":"sync-uuid"}'); }
+            else { res.setStatusCode(404); res.setBody('unexpected ' + req.getEndpoint()); }
+            return res;
+        }
+    }
+
+    private static String reimbursedJson(String email, Date payDate) {
+        Map<String, Object> reimb = new Map<String, Object>{
+            'id' => 'ramp-reimb-paid-1', 'user_id' => 'ru-paid-1', 'user_email' => email, 'user_full_name' => 'Test Emp',
+            'amount' => 50.00, 'currency' => 'USD', 'direction' => 'BUSINESS_TO_USER', 'type' => 'OUT_OF_POCKET',
+            'state' => 'REIMBURSED', 'sync_status' => 'SYNC_READY', 'transaction_date' => String.valueOf(payDate),
+            'payment_processed_at' => String.valueOf(payDate) + 'T00:00:00+00:00',
+            'memo' => 'Travel', 'merchant' => 'Hotel', 'entity_id' => 'e2'
+        };
+        return JSON.serialize(new Map<String, Object>{ 'data' => new List<Object>{ reimb }, 'page' => new Map<String, Object>{ 'next' => null } });
+    }
 }
