@@ -60,6 +60,7 @@ private class RampReimbursementBuilderTest {
         System.assertEquals(1, rb.lines.size());
         System.assertEquals(suspenseGL.Id, rb.lines[0].AcctSeed__Expense_GL_Account__c, 'uncoded → suspense GL');
         System.assertEquals(60.00, rb.lines[0].AcctSeed__Amount__c);
+        System.assertEquals(openPeriodDate(), rb.lines[0].AcctSeed__Date__c, 'line date must match header date');
         System.assertEquals(false, rb.isPaid);
     }
 
@@ -106,5 +107,37 @@ private class RampReimbursementBuilderTest {
         System.assertEquals(0, res.successful.size());
         System.assertEquals(1, res.failed.size());
         System.assert(res.failed.get('rb-5').contains('No active Salesforce User'), res.failed.get('rb-5'));
+    }
+
+    @IsTest
+    static void build_deletedGLVariable_fails() {
+        configure();
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        System.runAs(admin) {
+            insert new AcctSeed__Accounting_Variable__c(
+                Name = 'Deleted Dept',
+                AcctSeed__Type__c = 'GL Account Variable 1',
+                AcctSeed__Active__c = false,
+                Ramp_Field_Option_Id__c = 'deleted-var-uuid-123'
+            );
+        }
+
+        RampReimbursementBuilder.Reimbursement r = sample('rb-del', 50.00, empEmail, 'APPROVED');
+        RampReimbursementBuilder.ReimbFieldSelection sel = new RampReimbursementBuilder.ReimbFieldSelection();
+        sel.id = 'deleted-var-uuid-123';
+        sel.name = 'Deleted Dept';
+        sel.category_info = new RampReimbursementBuilder.ReimbField();
+        sel.category_info.type = 'COST_CENTER';
+        r.accounting_field_selections = new List<RampReimbursementBuilder.ReimbFieldSelection>{ sel };
+
+        Test.startTest();
+        RampReimbursementBuilder.BuildResult res = RampReimbursementBuilder.build(
+            new List<RampReimbursementBuilder.Reimbursement>{ r }
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, res.successful.size(), 'Deleted variable should cause failure');
+        System.assertEquals(1, res.failed.size());
+        System.assert(res.failed.get('rb-del').contains('deleted'), 'Error message should mention deletion: ' + res.failed.get('rb-del'));
     }
 }

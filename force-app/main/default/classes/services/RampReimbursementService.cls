@@ -77,7 +77,11 @@ public with sharing class RampReimbursementService {
             Map<Id, AcctSeed__Cash_Disbursement_Batch__c> batchByPeriod = new Map<Id, AcctSeed__Cash_Disbursement_Batch__c>();
             for (RampReimbursementBuilder.ReimbursementBuild rb : paid) {
                 if (!batchByPeriod.containsKey(rb.paymentPeriodId)) {
-                    batchByPeriod.put(rb.paymentPeriodId, new AcctSeed__Cash_Disbursement_Batch__c(AcctSeed__ExtId__c = BATCH_EXTID_PREFIX + rb.paymentPeriodId));
+                    String batchName = 'Ramp Reimbursement ' + String.valueOf(rb.cashDisbursement.AcctSeed__Disbursement_Date__c);
+                    batchByPeriod.put(rb.paymentPeriodId, new AcctSeed__Cash_Disbursement_Batch__c(
+                        Name = batchName,
+                        AcctSeed__ExtId__c = BATCH_EXTID_PREFIX + rb.paymentPeriodId
+                    ));
                 }
             }
             Database.upsert(batchByPeriod.values(), AcctSeed__Cash_Disbursement_Batch__c.AcctSeed__ExtId__c, false);
