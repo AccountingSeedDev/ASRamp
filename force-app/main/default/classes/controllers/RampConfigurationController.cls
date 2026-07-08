@@ -601,7 +601,7 @@ public with sharing class RampConfigurationController {
     }
 
     /** @description Read the Reference Lookup toggle + key template for the config subtab. */
-    @AuraEnabled(cacheable=true)
+    @AuraEnabled(cacheable=false)
     public static ReferenceLookupConfig getReferenceLookupConfig() {
         ReferenceLookupConfig cfg = new ReferenceLookupConfig();
         cfg.enabled = RampSyncSettingsService.referenceLookupEnabled();

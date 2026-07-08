@@ -102,6 +102,30 @@ private class RampSyncSettingsServiceTest {
     }
 
     @IsTest
+    static void referenceLookupEnabled_returnsTrueWhenSet() {
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'TestLedger',
+            Enable_Reference_Lookup__c = true,
+            Reference_Key_Template__c = '{merchant_name}'
+        );
+        RampSyncSettingsService.resetCache();
+
+        System.assertEquals(true, RampSyncSettingsService.referenceLookupEnabled());
+        System.assertEquals('{merchant_name}', RampSyncSettingsService.getReferenceKeyTemplate());
+    }
+
+    @IsTest
+    static void referenceLookupEnabled_returnsFalseByDefault() {
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'TestLedger'
+        );
+        RampSyncSettingsService.resetCache();
+
+        System.assertEquals(false, RampSyncSettingsService.referenceLookupEnabled());
+        System.assertEquals(null, RampSyncSettingsService.getReferenceKeyTemplate());
+    }
+
+    @IsTest
     static void defaultLedger_byNameStampsExtId() {
         AcctSeed__Ledger__c ledger = TestDataFactory.getInstance().getLedgers()[0];
         User admin = TestDataFactory.getInstance().getAdminUser();
