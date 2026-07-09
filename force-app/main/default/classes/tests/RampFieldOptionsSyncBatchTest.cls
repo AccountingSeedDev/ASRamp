@@ -292,6 +292,12 @@ private class RampFieldOptionsSyncBatchTest {
             HTTPResponse res = new HTTPResponse();
             res.setHeader('Content-Type', 'application/json');
 
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+                return res;
+            }
+
             if (req.getMethod() == 'PATCH') {
                 res.setStatusCode(200);
                 res.setBody('{"ramp_id": "updated-option-id", "value": "Updated"}');

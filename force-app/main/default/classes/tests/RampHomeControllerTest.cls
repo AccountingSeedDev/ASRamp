@@ -156,6 +156,7 @@ private class RampHomeControllerTest {
                 AcctSeed__Accounting_Period__c = period.Id,
                 AcctSeed__Ledger__c = ledger.Id,
                 AcctSeed__Status__c = 'In Process',
+                AcctSeed__Payee_Reference__c = 'stale prior-run payee',
                 Ramp_Sync_Status__c = 'Failed',
                 Ramp_Sync_Error__c = 'stale prior-run error'
             );

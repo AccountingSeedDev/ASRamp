@@ -7,6 +7,9 @@ private class RampGLAccountServiceTest {
     // No credential is packaged; inject a synthetic one for the callout path.
     static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
 
+    // Captures the POST body from RampGLAccountCaptureMock (Apex forbids static members on inner classes).
+    static String capturedPostBody;
+
     @TestSetup
     static void setup() {
         TestDataFactory.getInstance().initialize();
@@ -371,14 +374,14 @@ private class RampGLAccountServiceTest {
         User adminUser = TestDataFactory.getInstance().getAdminUser();
 
         System.runAs(adminUser) {
-            RampGLAccountCaptureMock.lastPostBody = null;
+            capturedPostBody = null;
             Test.setMock(HttpCalloutMock.class, new RampGLAccountCaptureMock());
 
             Test.startTest();
             RampGLAccountService.syncAllGLAccounts();
             Test.stopTest();
 
-            String capturedBody = RampGLAccountCaptureMock.lastPostBody;
+            String capturedBody = capturedPostBody;
             System.assert(String.isNotBlank(capturedBody), 'POST body should have been captured');
 
             Map<String, Object> reqMap = (Map<String, Object>) JSON.deserializeUntyped(capturedBody);
@@ -496,8 +499,6 @@ private class RampGLAccountServiceTest {
      * flow through the create path.
      */
     private class RampGLAccountCaptureMock implements HttpCalloutMock {
-        static String lastPostBody;
-
         public HttpResponse respond(HttpRequest req) {
             HttpResponse res = new HttpResponse();
             res.setHeader('Content-Type', 'application/json');
@@ -515,7 +516,7 @@ private class RampGLAccountServiceTest {
             }
 
             // POST — capture the body, then echo back with ramp_ids so the service can write back.
-            lastPostBody = req.getBody();
+            capturedPostBody = req.getBody();
             res.setStatusCode(200);
             Map<String, Object> requestMap = (Map<String, Object>) JSON.deserializeUntyped(req.getBody());
             List<Object> requestAccounts = (List<Object>) requestMap.get('gl_accounts');
