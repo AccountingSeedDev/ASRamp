@@ -98,6 +98,9 @@ public with sharing class RampGLAccountService {
             }
 
             // 4. All callouts done — now safe to do all DML.
+            // Use partial-success DML (allOrNone=false) so write-back failures caused
+            // by validation rules or sharing rules do not throw, which would roll back
+            // the AJR insert and leave no audit trail of the run.
             List<AcctSeed__GL_Account__c> toWriteBack = new List<AcctSeed__GL_Account__c>();
             for (AcctSeed__GL_Account__c gl : toCreate) {
                 String rampId = allNewRampIds.get(gl.Id);
@@ -106,27 +109,58 @@ public with sharing class RampGLAccountService {
                     toWriteBack.add(gl);
                 }
             }
+
+            Integer writeBackOk = 0;
+            Integer writeBackFailed = 0;
+            List<String> writeBackErrors = new List<String>();
             if (!toWriteBack.isEmpty()) {
-                update toWriteBack;
+                List<Database.SaveResult> srs = Database.update(toWriteBack, false);
+                for (Integer i = 0; i < srs.size(); i++) {
+                    if (srs[i].isSuccess()) {
+                        writeBackOk++;
+                    } else {
+                        writeBackFailed++;
+                        List<Database.Error> errs = srs[i].getErrors();
+                        String errMsg = errs.isEmpty() ? 'Unknown error' : errs[0].getMessage();
+                        writeBackErrors.add(toWriteBack[i].Name + ': ' + errMsg);
+                    }
+                }
             }
 
             Integer restamped = 0;
+            Integer restampFailed = 0;
             if (!toRestamp.isEmpty()) {
-                update toRestamp;
-                restamped = toRestamp.size();
+                List<Database.SaveResult> srs = Database.update(toRestamp, false);
+                for (Integer i = 0; i < srs.size(); i++) {
+                    if (srs[i].isSuccess()) {
+                        restamped++;
+                    } else {
+                        restampFailed++;
+                        List<Database.Error> errs = srs[i].getErrors();
+                        String errMsg = errs.isEmpty() ? 'Unknown error' : errs[0].getMessage();
+                        writeBackErrors.add('Restamp ' + toRestamp[i].Name + ': ' + errMsg);
+                    }
+                }
             }
 
-            // Records Ramp accepted but whose ID was not echoed back — write-back couldn't happen.
+            // Records Ramp accepted but whose ID was not echoed back — write-back impossible.
             Integer notStamped = toCreate.size() - toWriteBack.size();
+            Integer totalFailed = notStamped + writeBackFailed + restampFailed;
 
             List<String> parts = new List<String>();
-            if (toWriteBack.size() > 0) parts.add('created ' + toWriteBack.size() + ' (' + totalBatches + ' batch(es))');
+            if (writeBackOk > 0) parts.add('created ' + writeBackOk + ' (' + totalBatches + ' batch(es))');
             if (restamped > 0) parts.add('restored Ramp_Id__c on ' + restamped + ' existing record(s)');
             if (notStamped > 0) parts.add('WARNING: ' + notStamped + ' record(s) sent to Ramp but received no ID echo — Ramp_Id__c not stamped');
+            if (writeBackFailed > 0) parts.add('ERROR: ' + writeBackFailed + ' Ramp_Id__c write-back failure(s) — GL Account created in Ramp but Salesforce record not updated');
+            if (restampFailed > 0) parts.add('ERROR: ' + restampFailed + ' re-stamp failure(s) — Ramp_Id__c could not be saved to existing record(s)');
             if (parts.isEmpty()) parts.add('all GL Accounts already linked — nothing to do');
             String summary = 'GL Account sync complete: ' + String.join(parts, '; ') + '.';
+            String notes = summary;
+            if (!writeBackErrors.isEmpty()) {
+                notes = RampJobResultLogger.appendNote(notes, 'Write-back errors:\n' + String.join(writeBackErrors, '\n'));
+            }
             RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC,
-                glAccounts.size(), toWriteBack.size() + restamped, notStamped, summary);
+                glAccounts.size(), writeBackOk + restamped, totalFailed, notes);
             return summary;
         } catch (Exception e) {
             RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC, 0, 0, 1,
