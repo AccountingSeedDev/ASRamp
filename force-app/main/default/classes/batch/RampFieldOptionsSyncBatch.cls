@@ -1,7 +1,12 @@
 /**
- * @description Batch job to sync Accounting Variable values to Ramp custom field options
- * Creates new options or updates existing ones based on Ramp_Field_Option_Id__c
- * Designed to run on a schedule for ongoing synchronization
+ * @description Batch job to sync Accounting Variable values to Ramp custom field options.
+ * Creates new options or updates existing ones based on Ramp_Field_Option_Id__c.
+ * Designed to run on a schedule for ongoing synchronization.
+ *
+ * Callout/DML ordering: Salesforce prohibits callouts after uncommitted DML in the
+ * same transaction. execute() is structured in four explicit phases — all PATCHes,
+ * all POSTs, all GETs, then a single DML — so multi-type chunks never produce a
+ * "You have uncommitted work pending" CalloutException.
  */
 public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, Database.AllowsCallouts, Database.Stateful {
 
@@ -37,20 +42,24 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     }
 
     /**
-     * @description Execute method - process each batch of variables
+     * @description Process each batch chunk.
+     *
+     * Four explicit phases keep the transaction callout-safe when a chunk spans
+     * more than one variable type:
+     *   Phase 1 — PATCH callouts for records that already have a Ramp ID (no DML).
+     *   Phase 2 — POST callouts to create options for records that lack a Ramp ID (no DML).
+     *   Phase 3 — GET callouts to fetch Ramp IDs for each successfully POSTed type (no DML).
+     *   Phase 4 — single batched DML to stamp all Ramp IDs on SF records.
      */
     public void execute(Database.BatchableContext bc, List<AcctSeed__Accounting_Variable__c> scope) {
-        // Separate variables into those needing create vs update
         Map<String, List<AcctSeed__Accounting_Variable__c>> toCreateByField =
             new Map<String, List<AcctSeed__Accounting_Variable__c>>();
         List<AcctSeed__Accounting_Variable__c> toUpdate = new List<AcctSeed__Accounting_Variable__c>();
 
         for (AcctSeed__Accounting_Variable__c variable : scope) {
             if (String.isNotBlank(variable.Ramp_Field_Option_Id__c)) {
-                // Has Ramp ID - needs update
                 toUpdate.add(variable);
             } else {
-                // No Ramp ID - needs create
                 String fieldType = variable.AcctSeed__Type__c;
                 if (!toCreateByField.containsKey(fieldType)) {
                     toCreateByField.put(fieldType, new List<AcctSeed__Accounting_Variable__c>());
@@ -59,7 +68,7 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
             }
         }
 
-        // Process updates (one at a time via PATCH)
+        // ── Phase 1: PATCH updates (callouts only, no DML) ──
         for (AcctSeed__Accounting_Variable__c variable : toUpdate) {
             try {
                 updateFieldOption(variable);
@@ -70,23 +79,56 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
             }
         }
 
-        // Process creates (batch by field type)
+        // ── Phases 2 & 3: POST creates then GET Ramp IDs (all callouts, no DML) ──
+        // Accumulate sfId→rampId pairs and the candidate records across all types
+        // before touching the database.
+        Map<String, String> sfIdToRampId = new Map<String, String>();
+        List<AcctSeed__Accounting_Variable__c> candidatesForStamp = new List<AcctSeed__Accounting_Variable__c>();
+
         for (String fieldType : toCreateByField.keySet()) {
             String rampFieldId = fieldNameToRampId.get(fieldType);
+            List<AcctSeed__Accounting_Variable__c> variables = toCreateByField.get(fieldType);
+
             if (String.isBlank(rampFieldId)) {
-                errorCount++;
+                errorCount += variables.size();
                 errors.add(fieldType + ': No Ramp field ID found');
                 continue;
             }
 
             try {
-                List<AcctSeed__Accounting_Variable__c> variables = toCreateByField.get(fieldType);
-                createFieldOptions(rampFieldId, variables);
-                createdCount += variables.size();
+                // Phase 2: POST — create options in Ramp (callout only)
+                postFieldOptions(rampFieldId, variables);
+
+                // Phase 3: GET — fetch Ramp IDs for stamping (callout only)
+                Set<String> sfIds = new Set<String>();
+                for (AcctSeed__Accounting_Variable__c v : variables) {
+                    sfIds.add(v.Id);
+                }
+                sfIdToRampId.putAll(fetchRampIds(rampFieldId, sfIds));
+                candidatesForStamp.addAll(variables);
             } catch (Exception e) {
-                errorCount++;
+                errorCount += variables.size();
                 errors.add('Create ' + fieldType + ': ' + e.getMessage());
             }
+        }
+
+        // ── Phase 4: DML — stamp all Ramp IDs in one operation ──
+        List<AcctSeed__Accounting_Variable__c> toStamp = new List<AcctSeed__Accounting_Variable__c>();
+        for (AcctSeed__Accounting_Variable__c variable : candidatesForStamp) {
+            String rampId = sfIdToRampId.get(variable.Id);
+            if (String.isNotBlank(rampId)) {
+                toStamp.add(new AcctSeed__Accounting_Variable__c(
+                    Id = variable.Id,
+                    Ramp_Field_Option_Id__c = rampId
+                ));
+                createdCount++;
+            } else {
+                errorCount++;
+                errors.add('Create ' + variable.Name + ': Ramp ID not returned after POST');
+            }
+        }
+        if (!toStamp.isEmpty()) {
+            update toStamp;
         }
     }
 
@@ -115,7 +157,7 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     }
 
     /**
-     * @description Updates an existing field option in Ramp via PATCH
+     * @description PATCH an existing field option in Ramp. Callout only — no DML.
      * @param variable The accounting variable to update
      */
     private void updateFieldOption(AcctSeed__Accounting_Variable__c variable) {
@@ -138,21 +180,18 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     }
 
     /**
-     * @description Creates new field options in Ramp via batch POST
+     * @description POST new field options to Ramp. Callout only — no DML.
      * @param rampFieldId The Ramp field ID
      * @param variables List of accounting variables to create as options
      */
-    private void createFieldOptions(String rampFieldId, List<AcctSeed__Accounting_Variable__c> variables) {
-        // Build options array
+    private void postFieldOptions(String rampFieldId, List<AcctSeed__Accounting_Variable__c> variables) {
         List<Map<String, Object>> options = new List<Map<String, Object>>();
-
         for (AcctSeed__Accounting_Variable__c variable : variables) {
-            Map<String, Object> option = new Map<String, Object>{
-                'id' => variable.Id,  // Use SF ID as the option ID
+            options.add(new Map<String, Object>{
+                'id' => variable.Id,
                 'value' => variable.Name,
-                'code' => variable.Id  // Store SF ID in code for correlation
-            };
-            options.add(option);
+                'code' => variable.Id
+            });
         }
 
         Map<String, Object> requestBody = new Map<String, Object>{
@@ -161,13 +200,9 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
             'accounting_connection_id' => accountingConnectionId
         };
 
-        String body = JSON.serialize(requestBody);
-        HttpResponse res = RampAPIService.post('/developer/v1/accounting/field-options', body);
+        HttpResponse res = RampAPIService.post('/developer/v1/accounting/field-options', JSON.serialize(requestBody));
 
-        if (res.getStatusCode() == 200 || res.getStatusCode() == 201) {
-            // POST response may not include ramp_ids, so fetch them via GET
-            fetchAndUpdateRampIds(rampFieldId, variables);
-        } else {
+        if (res.getStatusCode() != 200 && res.getStatusCode() != 201) {
             throw new RampAccountingFieldService.RampAccountingFieldException(
                 'POST failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
             );
@@ -175,18 +210,15 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     }
 
     /**
-     * @description Fetches field options from Ramp and updates SF records with ramp_ids
-     * @param rampFieldId The Ramp field ID
-     * @param variables The variables that were created
+     * @description Fetch Ramp IDs for the given Salesforce record IDs from the
+     * field-options GET endpoint. Handles Ramp's keyset pagination. Callout only —
+     * no DML; the caller stamps SF records after all callouts complete.
+     *
+     * @param rampFieldId  Ramp field UUID for the GL Account Variable type
+     * @param sfIds        SF record IDs to match against returned `code` values
+     * @return Map from Salesforce Id to Ramp option ID
      */
-    private void fetchAndUpdateRampIds(String rampFieldId, List<AcctSeed__Accounting_Variable__c> variables) {
-        // Build set of SF IDs we're looking for
-        Set<String> sfIds = new Set<String>();
-        for (AcctSeed__Accounting_Variable__c v : variables) {
-            sfIds.add(v.Id);
-        }
-
-        // Fetch all options for this field
+    private Map<String, String> fetchRampIds(String rampFieldId, Set<String> sfIds) {
         Map<String, String> sfIdToRampId = new Map<String, String>();
         String nextPage = null;
 
@@ -207,15 +239,12 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                         Map<String, Object> optMap = (Map<String, Object>) opt;
                         String code = (String) optMap.get('code');
                         String rampId = (String) optMap.get('ramp_id');
-
-                        // Only process if this is one of our variables
                         if (sfIds.contains(code) && String.isNotBlank(rampId)) {
                             sfIdToRampId.put(code, rampId);
                         }
                     }
                 }
 
-                // Check for pagination
                 if (response.containsKey('page')) {
                     Map<String, Object> page = (Map<String, Object>) response.get('page');
                     nextPage = (String) page.get('next');
@@ -223,26 +252,12 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                     nextPage = null;
                 }
             } else {
-                // Log error but don't fail - options were created, just couldn't get IDs
-                System.debug('Failed to fetch field options: ' + res.getStatusCode() + ' - ' + res.getBody());
-                nextPage = null;
+                throw new RampAccountingFieldService.RampAccountingFieldException(
+                    'GET field-options failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
+                );
             }
         } while (nextPage != null);
 
-        // Update SF records with Ramp IDs
-        List<AcctSeed__Accounting_Variable__c> toUpdateRecords = new List<AcctSeed__Accounting_Variable__c>();
-        for (AcctSeed__Accounting_Variable__c variable : variables) {
-            String rampId = sfIdToRampId.get(variable.Id);
-            if (String.isNotBlank(rampId)) {
-                toUpdateRecords.add(new AcctSeed__Accounting_Variable__c(
-                    Id = variable.Id,
-                    Ramp_Field_Option_Id__c = rampId
-                ));
-            }
-        }
-
-        if (!toUpdateRecords.isEmpty()) {
-            update toUpdateRecords;
-        }
+        return sfIdToRampId;
     }
 }
