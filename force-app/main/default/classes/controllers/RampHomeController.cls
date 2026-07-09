@@ -640,6 +640,20 @@ public with sharing class RampHomeController {
                 isReimb ? 'reimb' : 'bill', isReimb ? 'syncReimb' : 'syncBill', ap.AcctSeed__Date__c, ap.Ramp_Sync_Error__c, true));
         }
 
+        // ── Reimbursement build/header failures: no payable record is created for
+        // these, so always surface the AJR entry when failures are reported.
+        // Build failures and DML failures are separate failure modes — the AJR
+        // entry is always shown alongside any per-record rows (no suppression). ──
+        AcctSeed__Automated_Job_Results__c reimbAjr = ajr.get(RampJobResultLogger.JOB_REIMBURSEMENT_SYNC);
+        if (reimbAjr != null && (Integer) nzDec(reimbAjr.AcctSeed__Failed__c) > 0) {
+            String reimbNotes = String.isNotBlank(reimbAjr.AcctSeed__Notes__c)
+                ? reimbAjr.AcctSeed__Notes__c
+                : 'Reimbursement sync failed (' + (Integer) nzDec(reimbAjr.AcctSeed__Failed__c) + ' error(s))';
+            rows.add(failure('transaction', reimbAjr.Id, 'Reimbursement sync', null,
+                'Reimbursement Payable', 'reimb', 'syncReimb',
+                reimbAjr.CreatedDate.date(), reimbNotes, true));
+        }
+
         // ── Master group: no per-record error fields, so surface the latest run's
         // Automated Job Result when it reported failures (reason = AJR notes). ──
         rows.addAll(masterFailures(ajr));

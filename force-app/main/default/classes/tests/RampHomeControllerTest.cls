@@ -122,4 +122,63 @@ private class RampHomeControllerTest {
             return res;
         }
     }
+
+    @IsTest
+    static void getHomeData_reimbAjrFailures_surfacedInErrorQueue() {
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_REIMBURSEMENT_SYNC,
+                AcctSeed__Processed__c = 1, AcctSeed__Succeeded__c = 0, AcctSeed__Failed__c = 1,
+                AcctSeed__Notes__c = 'ramp-reimb-err-1: Could not resolve an Expense GL Account for reimbursement ramp-reimb-err-1'
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            Boolean foundReimbFailure = false;
+            for (RampHomeController.Failure f : d.failures) {
+                if ('reimb'.equals(f.pipe)) { foundReimbFailure = true; break; }
+            }
+            System.assert(foundReimbFailure, 'AJR-based reimbursement failure should surface in error queue');
+        }
+    }
+
+    @IsTest
+    static void getHomeData_reimbAjrFailures_surfacedAlongsidePerRecordFailures() {
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            // Simulate a prior run that left a stale per-record Failed payable.
+            AcctSeed__Ledger__c ledger = TestDataFactory.getInstance().getLedgers()[0];
+            AcctSeed__Accounting_Period__c period = TestDataFactory.getInstance().getAccountingPeriods()[0];
+            AcctSeed__Account_Payable__c staleAp = new AcctSeed__Account_Payable__c(
+                AcctSeed__Employee__c = UserInfo.getUserId(),
+                AcctSeed__Date__c = period.AcctSeed__Start_Date__c,
+                AcctSeed__Accounting_Period__c = period.Id,
+                AcctSeed__Ledger__c = ledger.Id,
+                AcctSeed__Status__c = 'In Process',
+                Ramp_Sync_Status__c = 'Failed',
+                Ramp_Sync_Error__c = 'stale prior-run error'
+            );
+            insert staleAp;
+
+            // A new run AJR that also has a build failure (no payable created).
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_REIMBURSEMENT_SYNC,
+                AcctSeed__Processed__c = 1, AcctSeed__Succeeded__c = 0, AcctSeed__Failed__c = 1,
+                AcctSeed__Notes__c = 'ramp-reimb-new-1: No active Salesforce User matches email'
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            // Both the per-record failure AND the AJR-based failure should appear.
+            Integer reimbFailureCount = 0;
+            for (RampHomeController.Failure f : d.failures) {
+                if ('reimb'.equals(f.pipe)) reimbFailureCount++;
+            }
+            System.assert(reimbFailureCount >= 2,
+                'Both the stale per-record failure and the AJR-based build failure should surface: count=' + reimbFailureCount);
+        }
+    }
 }
