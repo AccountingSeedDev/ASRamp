@@ -182,4 +182,25 @@ private class RampHomeControllerTest {
                 'Both the stale per-record failure and the AJR-based build failure should surface: count=' + reimbFailureCount);
         }
     }
+
+    @IsTest
+    static void getHomeData_masterStepRemainsCompleteAfterAddingNewGLAccount() {
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            // Mark one GL Account as synced — simulates initial setup complete.
+            List<AcctSeed__GL_Account__c> glAccounts = TestDataFactory.getInstance().getGLAccounts();
+            glAccounts[0].Ramp_Id__c = 'ramp-gl-test-001';
+            update glAccounts[0];
+            // Remaining GL accounts have no Ramp_Id__c, simulating newly added records.
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            Boolean masterDone = false;
+            for (RampHomeController.Step s : d.steps) {
+                if (s.id == 'master') { masterDone = 'done'.equals(s.state); }
+            }
+            System.assert(masterDone, 'Master step must stay done once any GL account is synced, even if new unsynced records exist');
+        }
+    }
 }
