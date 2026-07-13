@@ -117,6 +117,16 @@ private class RampReimbursementServiceTest {
         return email;
     }
 
+    private static String configureForSyncNoBankGL() {
+        String email = configureForSync();
+        // Remove bank GL so the builder skips CD creation for REIMBURSED reimbursements.
+        RampSyncSettingsService.overrideGLDefaults = new Map<String, Id>{
+            RampSyncSettingsService.SPEC_SUSPENSE => RampSyncSettingsService.overrideGLDefaults.get(RampSyncSettingsService.SPEC_SUSPENSE)
+        };
+        RampSyncSettingsService.resetCache();
+        return email;
+    }
+
     @IsTest
     static void syncPage_lineDmlFailure_marksPayableFailed() {
         String email = configureForSync();
@@ -173,6 +183,23 @@ private class RampReimbursementServiceTest {
         List<AcctSeed__Cash_Disbursement_Batch__c> batches = [SELECT Name FROM AcctSeed__Cash_Disbursement_Batch__c WHERE AcctSeed__ExtId__c LIKE 'RAMP-REIMB:%'];
         System.assertEquals(1, batches.size(), 'One batch should be created');
         System.assertEquals('Ramp Reimbursement ' + String.valueOf(payDate), batches[0].Name, 'Batch name must follow naming convention');
+    }
+
+    @IsTest
+    static void syncPage_reimbursedNoBankGL_warnsInNotes() {
+        String email = configureForSyncNoBankGL();
+        Date payDate = [SELECT AcctSeed__Start_Date__c FROM AcctSeed__Accounting_Period__c WHERE AcctSeed__Status__c = 'Open' ORDER BY AcctSeed__Start_Date__c DESC LIMIT 1].AcctSeed__Start_Date__c;
+        Test.setMock(HttpCalloutMock.class, new ReimbursedMock(email, payDate));
+
+        Test.startTest();
+        RampReimbursementService.PageResult r = RampReimbursementService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(1, r.payablesCreated, 'Payable should still be created: ' + r.errorMessages);
+        System.assertEquals(0, r.failedCount, 'failedCount should remain 0 — payable succeeded');
+        System.assertEquals(0, r.cashDisbursementsCreated, 'No CD should be created without bank GL');
+        System.assertEquals(1, r.errorMessages.size(), 'Warning should be logged to AJR notes: ' + r.errorMessages);
+        System.assert(r.errorMessages[0].contains('Ramp Bill Payment Bank'), 'Warning should mention the missing GL Account config: ' + r.errorMessages[0]);
     }
 
     private class ReimbursedMock extends BaseMock {
