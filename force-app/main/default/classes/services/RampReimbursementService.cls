@@ -132,7 +132,11 @@ public with sharing class RampReimbursementService {
             } else {
                 okSyncs.add(ref(rb.reimbursementId, rb.header.Id));
                 payableIdsToFlip.add(rb.header.Id);
-                if (rb.cashDisbursement != null && rb.cashDisbursement.Id != null) cdIdsToFlip.add(rb.cashDisbursement.Id);
+                if (rb.cashDisbursement != null && rb.cashDisbursement.Id != null) {
+                    cdIdsToFlip.add(rb.cashDisbursement.Id);
+                } else if (rb.isPaid) {
+                    result.errorMessages.add(rb.reimbursementId + ': Payable created successfully, but Cash Disbursement was not created — "Ramp Bill Payment Bank" GL Account is not configured or the payment period is not open.');
+                }
             }
         }
 
