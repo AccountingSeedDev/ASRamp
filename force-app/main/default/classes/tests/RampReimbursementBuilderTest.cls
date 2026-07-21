@@ -110,21 +110,47 @@ private class RampReimbursementBuilderTest {
     }
 
     @IsTest
-    static void build_deletedGLVariable_fails() {
+    static void build_inactiveGLVariable_fails() {
         configure();
         User admin = TestDataFactory.getInstance().getAdminUser();
         System.runAs(admin) {
             insert new AcctSeed__Accounting_Variable__c(
-                Name = 'Deleted Dept',
+                Name = 'Inactive Dept',
                 AcctSeed__Type__c = 'GL Account Variable 1',
                 AcctSeed__Active__c = false,
-                Ramp_Field_Option_Id__c = 'deleted-var-uuid-123'
+                Ramp_Field_Option_Id__c = 'inactive-var-uuid-123'
             );
         }
 
+        RampReimbursementBuilder.Reimbursement r = sample('rb-inact', 50.00, empEmail, 'APPROVED');
+        RampReimbursementBuilder.ReimbFieldSelection sel = new RampReimbursementBuilder.ReimbFieldSelection();
+        sel.id = 'inactive-var-uuid-123';
+        sel.name = 'Inactive Dept';
+        sel.category_info = new RampReimbursementBuilder.ReimbField();
+        sel.category_info.type = 'COST_CENTER';
+        r.accounting_field_selections = new List<RampReimbursementBuilder.ReimbFieldSelection>{ sel };
+
+        Test.startTest();
+        RampReimbursementBuilder.BuildResult res = RampReimbursementBuilder.build(
+            new List<RampReimbursementBuilder.Reimbursement>{ r }
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, res.successful.size(), 'Inactive variable should cause failure');
+        System.assertEquals(1, res.failed.size());
+        System.assert(res.failed.get('rb-inact').contains('inactive'),
+            'Error message should say inactive, not deleted: ' + res.failed.get('rb-inact'));
+    }
+
+    @IsTest
+    static void build_deletedGLVariable_fails() {
+        configure();
+
+        // No Accounting_Variable__c exists for this option id — simulates a variable
+        // that was deleted in Accounting Seed but remains selectable in Ramp.
         RampReimbursementBuilder.Reimbursement r = sample('rb-del', 50.00, empEmail, 'APPROVED');
         RampReimbursementBuilder.ReimbFieldSelection sel = new RampReimbursementBuilder.ReimbFieldSelection();
-        sel.id = 'deleted-var-uuid-123';
+        sel.id = 'deleted-var-uuid-999';
         sel.name = 'Deleted Dept';
         sel.category_info = new RampReimbursementBuilder.ReimbField();
         sel.category_info.type = 'COST_CENTER';
@@ -138,6 +164,7 @@ private class RampReimbursementBuilderTest {
 
         System.assertEquals(0, res.successful.size(), 'Deleted variable should cause failure');
         System.assertEquals(1, res.failed.size());
-        System.assert(res.failed.get('rb-del').contains('deleted'), 'Error message should mention deletion: ' + res.failed.get('rb-del'));
+        System.assert(res.failed.get('rb-del').contains('deleted'),
+            'Error message should mention deletion: ' + res.failed.get('rb-del'));
     }
 }

@@ -249,10 +249,21 @@ public with sharing class RampReimbursementBuilder {
             List<ReimbFieldSelection> selections, Map<String, AcctSeed__Accounting_Variable__c> varByUuid) {
         if (selections == null) return;
         for (ReimbFieldSelection sel : selections) {
-            if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
+            if (String.isBlank(sel.id)) continue;
+            // GL Account selections are resolved separately in buildLine — skip them here.
+            String selType = (sel.category_info != null) ? sel.category_info.type : null;
+            if (selType == 'GL_ACCOUNT') continue;
+
             AcctSeed__Accounting_Variable__c v = varByUuid.get(sel.id);
+            String selLabel = (sel.name != null ? sel.name : sel.id);
+            if (v == null) {
+                // No live Accounting Variable maps to this option — the variable was
+                // deleted in Accounting Seed but remains selectable in Ramp. Fail the
+                // record rather than syncing silently with a blank variable field.
+                throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id + ') no longer exists in Accounting Seed (it was deleted) and cannot be used for coding.');
+            }
             if (!v.AcctSeed__Active__c) {
-                throw new BuildException('GL Variable "' + (sel.name != null ? sel.name : sel.id) + '" (option id: ' + sel.id + ') has been deleted in Accounting Seed and cannot be used for coding.');
+                throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id + ') is inactive in Accounting Seed and cannot be used for coding.');
             }
             String t = v.AcctSeed__Type__c;
             if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = v.Id;
