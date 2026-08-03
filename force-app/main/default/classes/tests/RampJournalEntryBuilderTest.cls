@@ -362,6 +362,101 @@ private class RampJournalEntryBuilderTest {
     }
 
     @IsTest
+    static void build_deletedGLVariable_fails() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-del');
+        // No Accounting_Variable__c exists for this option id — simulates a variable
+        // deleted in Accounting Seed but still selectable under the Ramp field.
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-var-del', 100.0, 'gl-uuid-del');
+        RampJournalEntryBuilder.AccountingFieldSelection s = new RampJournalEntryBuilder.AccountingFieldSelection();
+        s.id = 'deleted-var-uuid-999';
+        s.name = 'Deleted Dept';
+        s.type = 'CUSTOM';
+        s.category_info = new RampJournalEntryBuilder.CategoryInfo();
+        s.category_info.name = 'GL Account Variable 1';
+        t.accounting_field_selections.add(s);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, result.successful.size(), 'Deleted variable should fail the transaction');
+        System.assertEquals(1, result.failed.size());
+        System.assert(result.failed.get('txn-var-del').contains('deleted'),
+            'Error should mention deletion: ' + result.failed.get('txn-var-del'));
+    }
+
+    @IsTest
+    static void build_inactiveGLVariable_fails() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-inact');
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        System.runAs(admin) {
+            insert new AcctSeed__Accounting_Variable__c(
+                Name = 'Inactive Dept',
+                AcctSeed__Type__c = 'GL Account Variable 1',
+                AcctSeed__Active__c = false,
+                Ramp_Field_Option_Id__c = 'inactive-var-uuid-1'
+            );
+        }
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-var-inact', 100.0, 'gl-uuid-inact');
+        RampJournalEntryBuilder.AccountingFieldSelection s = new RampJournalEntryBuilder.AccountingFieldSelection();
+        s.id = 'inactive-var-uuid-1';
+        s.name = 'Inactive Dept';
+        s.type = 'CUSTOM';
+        s.category_info = new RampJournalEntryBuilder.CategoryInfo();
+        s.category_info.name = 'GL Account Variable 1';
+        t.accounting_field_selections.add(s);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, result.successful.size(), 'Inactive variable should fail the transaction');
+        System.assertEquals(1, result.failed.size());
+        System.assert(result.failed.get('txn-var-inact').contains('inactive'),
+            'Error should say inactive, not deleted: ' + result.failed.get('txn-var-inact'));
+    }
+
+    @IsTest
+    static void build_unmappedNonVariableField_syncsWithoutFailure() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-sub');
+
+        // A Ramp-native field (Subsidiary) not synced by ASRamp: it has no matching
+        // Accounting Variable and must be ignored, not fail the transaction.
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-sub', 100.0, 'gl-uuid-sub');
+        RampJournalEntryBuilder.AccountingFieldSelection s = new RampJournalEntryBuilder.AccountingFieldSelection();
+        s.id = 'subsidiary-option-uuid-1';
+        s.name = 'West Division';
+        s.type = 'SUBSIDIARY';
+        s.category_info = new RampJournalEntryBuilder.CategoryInfo();
+        s.category_info.name = 'Subsidiary';
+        t.accounting_field_selections.add(s);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size(), 'Unmapped non-variable field must not fail the sync: ' + result.failed);
+        System.assertEquals(0, result.failed.size());
+    }
+
+    @IsTest
     static void build_unresolvedGLNoSuspense_failsTransaction() {
         TestDataFactory.getInstance();
         configureSettings('CardClearing-TEST', 'Ledger-TEST');

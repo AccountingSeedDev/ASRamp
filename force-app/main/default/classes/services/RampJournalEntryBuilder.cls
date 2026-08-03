@@ -481,8 +481,26 @@ public with sharing class RampJournalEntryBuilder {
     ) {
         if (selections == null) return;
         for (AccountingFieldSelection sel : selections) {
-            if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
+            if (String.isBlank(sel.id)) continue;
             AcctSeed__Accounting_Variable__c var = varByUuid.get(sel.id);
+            if (var == null) {
+                // No live Accounting Variable maps to this option. Only fail when the
+                // option belongs to one of our synced "GL Account Variable 1-4" fields
+                // (a variable deleted in Accounting Seed but still selectable in Ramp).
+                // Other Ramp field types (subsidiary, project, customer-native fields)
+                // don't map to Accounting Variables and are legitimately ignored.
+                if (isGLVariableField(sel)) {
+                    String selLabel = (sel.name != null ? sel.name : sel.id);
+                    throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id
+                        + ') no longer exists in Accounting Seed (it was deleted) and cannot be used for coding.');
+                }
+                continue;
+            }
+            if (!var.AcctSeed__Active__c) {
+                String selLabel = (sel.name != null ? sel.name : sel.id);
+                throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id
+                    + ') is inactive in Accounting Seed and cannot be used for coding.');
+            }
             // Variable's own AcctSeed__Type__c tells us which column (1-4)
             String varType = var.AcctSeed__Type__c;
             if (varType == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) {
@@ -495,6 +513,15 @@ public with sharing class RampJournalEntryBuilder {
                 line.AcctSeed__GL_Account_Variable_4__c = var.Id;
             }
         }
+    }
+
+    // A selection belongs to one of the GL Account Variable fields ASRamp creates in
+    // Ramp (named 'GL Account Variable 1'-'4' — see RampAccountingFieldService). The
+    // parent field is carried on category_info, so a coded option whose field is one
+    // of ours but which no longer resolves means the variable was deleted.
+    private static Boolean isGLVariableField(AccountingFieldSelection sel) {
+        String fieldName = (sel.category_info != null) ? sel.category_info.name : null;
+        return fieldName != null && fieldName.startsWith('GL Account Variable');
     }
 
     private static String findSelectionId(List<AccountingFieldSelection> selections, String type) {
@@ -871,10 +898,13 @@ public with sharing class RampJournalEntryBuilder {
     private static Map<String, AcctSeed__Accounting_Variable__c> resolveVariables(Set<String> uuids) {
         Map<String, AcctSeed__Accounting_Variable__c> result = new Map<String, AcctSeed__Accounting_Variable__c>();
         if (uuids.isEmpty()) return result;
+        // Include inactive variables so applyVariables can distinguish "inactive"
+        // from "deleted" and fail the record with an accurate message rather than
+        // syncing silently with a blank variable field.
         for (AcctSeed__Accounting_Variable__c var : [
-            SELECT Id, AcctSeed__Type__c, Ramp_Field_Option_Id__c
+            SELECT Id, AcctSeed__Type__c, AcctSeed__Active__c, Ramp_Field_Option_Id__c
             FROM AcctSeed__Accounting_Variable__c
-            WHERE Ramp_Field_Option_Id__c IN :uuids AND AcctSeed__Active__c = true
+            WHERE Ramp_Field_Option_Id__c IN :uuids
         ]) {
             result.put(var.Ramp_Field_Option_Id__c, var);
         }

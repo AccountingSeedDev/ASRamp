@@ -257,10 +257,15 @@ public with sharing class RampReimbursementBuilder {
             AcctSeed__Accounting_Variable__c v = varByUuid.get(sel.id);
             String selLabel = (sel.name != null ? sel.name : sel.id);
             if (v == null) {
-                // No live Accounting Variable maps to this option — the variable was
-                // deleted in Accounting Seed but remains selectable in Ramp. Fail the
-                // record rather than syncing silently with a blank variable field.
-                throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id + ') no longer exists in Accounting Seed (it was deleted) and cannot be used for coding.');
+                // No live Accounting Variable maps to this option. Only fail when the
+                // option belongs to one of our synced "GL Account Variable 1-4" fields
+                // (a variable deleted in Accounting Seed but still selectable in Ramp).
+                // Other Ramp field types (subsidiary, project, customer-native fields)
+                // don't map to Accounting Variables and are legitimately ignored.
+                if (isGLVariableField(sel)) {
+                    throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id + ') no longer exists in Accounting Seed (it was deleted) and cannot be used for coding.');
+                }
+                continue;
             }
             if (!v.AcctSeed__Active__c) {
                 throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id + ') is inactive in Accounting Seed and cannot be used for coding.');
@@ -271,6 +276,15 @@ public with sharing class RampReimbursementBuilder {
             else if (t == 'GL Account Variable 3' && line.AcctSeed__GL_Account_Variable_3__c == null) line.AcctSeed__GL_Account_Variable_3__c = v.Id;
             else if (t == 'GL Account Variable 4' && line.AcctSeed__GL_Account_Variable_4__c == null) line.AcctSeed__GL_Account_Variable_4__c = v.Id;
         }
+    }
+
+    // A selection belongs to one of the GL Account Variable fields ASRamp creates in
+    // Ramp (named 'GL Account Variable 1'-'4' — see RampAccountingFieldService). The
+    // parent field is carried on category_info, so a coded option whose field is one
+    // of ours but which no longer resolves means the variable was deleted.
+    private static Boolean isGLVariableField(ReimbFieldSelection sel) {
+        String fieldName = (sel.category_info != null) ? sel.category_info.name : null;
+        return fieldName != null && fieldName.startsWith('GL Account Variable');
     }
 
     private static void collectUuids(List<ReimbFieldSelection> sels, Set<String> glUuids, Set<String> varUuids) {

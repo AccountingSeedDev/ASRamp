@@ -127,7 +127,7 @@ private class RampReimbursementBuilderTest {
         sel.id = 'inactive-var-uuid-123';
         sel.name = 'Inactive Dept';
         sel.category_info = new RampReimbursementBuilder.ReimbField();
-        sel.category_info.type = 'COST_CENTER';
+        sel.category_info.name = 'GL Account Variable 1';
         r.accounting_field_selections = new List<RampReimbursementBuilder.ReimbFieldSelection>{ sel };
 
         Test.startTest();
@@ -153,7 +153,7 @@ private class RampReimbursementBuilderTest {
         sel.id = 'deleted-var-uuid-999';
         sel.name = 'Deleted Dept';
         sel.category_info = new RampReimbursementBuilder.ReimbField();
-        sel.category_info.type = 'COST_CENTER';
+        sel.category_info.name = 'GL Account Variable 1';
         r.accounting_field_selections = new List<RampReimbursementBuilder.ReimbFieldSelection>{ sel };
 
         Test.startTest();
@@ -166,5 +166,30 @@ private class RampReimbursementBuilderTest {
         System.assertEquals(1, res.failed.size());
         System.assert(res.failed.get('rb-del').contains('deleted'),
             'Error message should mention deletion: ' + res.failed.get('rb-del'));
+    }
+
+    @IsTest
+    static void build_unmappedNonVariableField_syncsWithoutFailure() {
+        configure();
+
+        // A Ramp-native field (Subsidiary) not synced by ASRamp: it has no matching
+        // Accounting Variable and must be ignored, not fail the reimbursement.
+        RampReimbursementBuilder.Reimbursement r = sample('rb-sub', 50.00, empEmail, 'APPROVED');
+        RampReimbursementBuilder.ReimbFieldSelection sel = new RampReimbursementBuilder.ReimbFieldSelection();
+        sel.id = 'subsidiary-option-uuid-1';
+        sel.name = 'West Division';
+        sel.category_info = new RampReimbursementBuilder.ReimbField();
+        sel.category_info.name = 'Subsidiary';
+        sel.category_info.type = 'SUBSIDIARY';
+        r.accounting_field_selections = new List<RampReimbursementBuilder.ReimbFieldSelection>{ sel };
+
+        Test.startTest();
+        RampReimbursementBuilder.BuildResult res = RampReimbursementBuilder.build(
+            new List<RampReimbursementBuilder.Reimbursement>{ r }
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, res.successful.size(), 'Unmapped non-variable field must not fail the sync: ' + res.failed);
+        System.assertEquals(0, res.failed.size());
     }
 }
