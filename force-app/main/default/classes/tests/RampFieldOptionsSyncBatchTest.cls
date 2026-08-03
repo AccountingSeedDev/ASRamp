@@ -260,6 +260,15 @@ private class RampFieldOptionsSyncBatchTest {
         User adminUser = TestDataFactory.getInstance().getAdminUser();
 
         System.runAs(adminUser) {
+            // Scope the batch to the update-only path: remove variables without a Ramp ID
+            // (Department A and B from @TestSetup) so only Location A (PATCH) is processed.
+            // Without this, those records go through POST then GET, and the GET mock returns
+            // empty data so they end up counted as errors.
+            delete [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ];
+
             Map<String, String> fieldNameToRampId = new Map<String, String>{
                 'GL Account Variable 1' => 'ramp-field-id-1',
                 'GL Account Variable 2' => 'ramp-field-id-2',
