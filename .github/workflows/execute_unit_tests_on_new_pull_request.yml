@@ -45,7 +45,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # The SF CLI's HTTP stack (@jsforce/jsforce-node -> undici@8)
+          # requires Node >= 22.19.0; on Node 20 it crashes on the first
+          # API call with "webidl.util.markAsUncloneable is not a function".
+          node-version: "22"
 
       - name: Install SF CLI and auth Dev Hub
         run: |
