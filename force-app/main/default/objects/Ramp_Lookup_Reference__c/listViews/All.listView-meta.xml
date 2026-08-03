@@ -10,6 +10,8 @@
     <columns>GL_Account_Variable_4__c</columns>
     <columns>Override__c</columns>
     <columns>Employee__c</columns>
+    <columns>Product__c</columns>
+    <columns>Vendor__c</columns>
     <filterScope>Everything</filterScope>
     <label>All</label>
     <sharedTo>
