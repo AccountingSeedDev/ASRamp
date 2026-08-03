@@ -163,7 +163,6 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     private void updateFieldOption(AcctSeed__Accounting_Variable__c variable) {
         Map<String, Object> requestBody = new Map<String, Object>{
             'value' => variable.Name,
-            'code' => variable.Id,
             'is_active' => variable.AcctSeed__Active__c
         };
 

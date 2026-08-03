@@ -11,6 +11,7 @@ private class RampFieldOptionsSyncBatchTest {
 
     @TestSetup
     static void setup() {
+        TestDataFactory.getInstance().initialize();
         // Create test Accounting Variables
         List<AcctSeed__Accounting_Variable__c> variables = new List<AcctSeed__Accounting_Variable__c>();
 
@@ -47,199 +48,253 @@ private class RampFieldOptionsSyncBatchTest {
 
     @IsTest
     static void testBatchExecution_Success() {
-        // Build field name to Ramp ID map
-        Map<String, String> fieldNameToRampId = new Map<String, String>{
-            'GL Account Variable 1' => 'ramp-field-id-1',
-            'GL Account Variable 2' => 'ramp-field-id-2',
-            'GL Account Variable 3' => 'ramp-field-id-3',
-            'GL Account Variable 4' => 'ramp-field-id-4'
-        };
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
 
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockSuccess());
+        System.runAs(adminUser) {
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 1' => 'ramp-field-id-1',
+                'GL Account Variable 2' => 'ramp-field-id-2',
+                'GL Account Variable 3' => 'ramp-field-id-3',
+                'GL Account Variable 4' => 'ramp-field-id-4'
+            };
 
-        RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
-        Id jobId = Database.executeBatch(batch, 10);
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockSuccess());
 
-        Test.stopTest();
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 10);
+            Test.stopTest();
 
-        // Verify batch completed
-        AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
-        System.assertEquals('Completed', job.Status, 'Batch should complete successfully');
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete successfully');
+        }
     }
 
     @IsTest
     static void testBatchExecution_MissingFieldId() {
-        // Build field name to Ramp ID map with missing entry
-        Map<String, String> fieldNameToRampId = new Map<String, String>{
-            // Intentionally missing 'GL Account Variable 1'
-            'GL Account Variable 2' => 'ramp-field-id-2'
-        };
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
 
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockSuccess());
+        System.runAs(adminUser) {
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                // Intentionally missing 'GL Account Variable 1'
+                'GL Account Variable 2' => 'ramp-field-id-2'
+            };
 
-        RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
-        Id jobId = Database.executeBatch(batch, 10);
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockSuccess());
 
-        Test.stopTest();
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 10);
+            Test.stopTest();
 
-        // Batch should still complete, but with errors logged
-        AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
-        System.assertEquals('Completed', job.Status, 'Batch should complete even with missing field IDs');
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete even with missing field IDs');
 
-        // An Automated Job Result should document the run and WHY it failed.
-        List<AcctSeed__Automated_Job_Results__c> ajrs = [
-            SELECT AcctSeed__Failed__c, AcctSeed__Notes__c
-            FROM AcctSeed__Automated_Job_Results__c
-            WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
-        ];
-        System.assertEquals(1, ajrs.size(), 'The variable sync run should log one AJR');
-        System.assert(ajrs[0].AcctSeed__Failed__c > 0, 'Missing field id should be recorded as a failure');
-        System.assert(
-            ajrs[0].AcctSeed__Notes__c.contains('No Ramp field ID found'),
-            'AJR notes should explain why records did not sync: ' + ajrs[0].AcctSeed__Notes__c
-        );
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'The variable sync run should log one AJR');
+            System.assert(ajrs[0].AcctSeed__Failed__c > 0, 'Missing field id should be recorded as a failure');
+            System.assert(
+                ajrs[0].AcctSeed__Notes__c.contains('No Ramp field ID found'),
+                'AJR notes should explain why records did not sync: ' + ajrs[0].AcctSeed__Notes__c
+            );
+        }
     }
 
     @IsTest
     static void testBatchExecution_ApiError() {
-        Map<String, String> fieldNameToRampId = new Map<String, String>{
-            'GL Account Variable 1' => 'ramp-field-id-1',
-            'GL Account Variable 2' => 'ramp-field-id-2'
-        };
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
 
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockError());
+        System.runAs(adminUser) {
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 1' => 'ramp-field-id-1',
+                'GL Account Variable 2' => 'ramp-field-id-2'
+            };
 
-        RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
-        Id jobId = Database.executeBatch(batch, 10);
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockError());
 
-        Test.stopTest();
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 10);
+            Test.stopTest();
 
-        // Batch should complete but with errors
-        AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
-        System.assertEquals('Completed', job.Status, 'Batch should complete even with API errors');
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete even with API errors');
+        }
     }
 
     @IsTest
     static void testBatchExecution_MultipleTypes() {
-        // Insert one variable of each type WITHOUT a Ramp ID so both land in
-        // the "to create" path and — with a large batch size — end up in the
-        // same execute() chunk.  This exercises the multi-type-per-chunk fix
-        // that moved DML after all callouts to avoid a "uncommitted work" error.
-        List<AcctSeed__Accounting_Variable__c> extraVars = new List<AcctSeed__Accounting_Variable__c>();
-        extraVars.add(new AcctSeed__Accounting_Variable__c(
-            Name = 'Cost Center X',
-            AcctSeed__Type__c = 'GL Account Variable 1',
-            AcctSeed__Active__c = true
-        ));
-        extraVars.add(new AcctSeed__Accounting_Variable__c(
-            Name = 'Region Y',
-            AcctSeed__Type__c = 'GL Account Variable 2',
-            AcctSeed__Active__c = true
-        ));
-        insert extraVars;
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
 
-        Map<String, String> fieldNameToRampId = new Map<String, String>{
-            'GL Account Variable 1' => 'ramp-field-id-1',
-            'GL Account Variable 2' => 'ramp-field-id-2'
-        };
+        System.runAs(adminUser) {
+            // Insert one variable of each type WITHOUT a Ramp ID so both land in
+            // the "to create" path and — with a large batch size — end up in the
+            // same execute() chunk.  This exercises the multi-type-per-chunk fix
+            // that moved DML after all callouts to avoid a "uncommitted work" error.
+            insert new List<AcctSeed__Accounting_Variable__c>{
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Cost Center X',
+                    AcctSeed__Type__c = 'GL Account Variable 1',
+                    AcctSeed__Active__c = true
+                ),
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Region Y',
+                    AcctSeed__Type__c = 'GL Account Variable 2',
+                    AcctSeed__Active__c = true
+                )
+            };
 
-        // RampFieldOptionsMockSuccess returns 201 on POST and an implicit
-        // non-200 (status 0) on GET, so fetchRampIds returns an empty map —
-        // every newly-created variable is counted as an error.  The key
-        // assertion is that the batch still reaches Status = 'Completed'
-        // (before the fix it threw a CalloutException mid-execute).
-        Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockSuccess());
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 1' => 'ramp-field-id-1',
+                'GL Account Variable 2' => 'ramp-field-id-2'
+            };
 
-        Test.startTest();
-        RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
-        Id jobId = Database.executeBatch(batch, 200);
-        Test.stopTest();
+            // RampFieldOptionsMockSuccess returns 201 on POST and an implicit
+            // non-200 (status 0) on GET, so fetchRampIds returns an empty map —
+            // every newly-created variable is counted as an error.  The key
+            // assertion is that the batch still reaches Status = 'Completed'
+            // (before the fix it threw a CalloutException mid-execute).
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockSuccess());
 
-        AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
-        System.assertEquals('Completed', job.Status, 'Batch should complete when multiple types share a chunk');
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 200);
+            Test.stopTest();
 
-        List<AcctSeed__Automated_Job_Results__c> ajrs = [
-            SELECT AcctSeed__Failed__c
-            FROM AcctSeed__Automated_Job_Results__c
-            WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
-        ];
-        System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
-        System.assert(ajrs[0].AcctSeed__Failed__c > 0,
-            'Variables whose Ramp IDs were not returned by GET should be counted as failures');
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete when multiple types share a chunk');
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
+            System.assert(ajrs[0].AcctSeed__Failed__c > 0,
+                'Variables whose Ramp IDs were not returned by GET should be counted as failures');
+        }
     }
 
     @IsTest
     static void testBatchExecution_MultipleTypes_HappyPath() {
-        // Insert one variable of each type without a Ramp ID so both land in the
-        // "to create" path and end up in the same execute() chunk.
-        insert new List<AcctSeed__Accounting_Variable__c>{
-            new AcctSeed__Accounting_Variable__c(
-                Name = 'Cost Center X',
-                AcctSeed__Type__c = 'GL Account Variable 3',
-                AcctSeed__Active__c = true
-            ),
-            new AcctSeed__Accounting_Variable__c(
-                Name = 'Region Y',
-                AcctSeed__Type__c = 'GL Account Variable 4',
-                AcctSeed__Active__c = true
-            )
-        };
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
 
-        // Query ALL active variables that will be processed (no Ramp ID yet) so
-        // the mock can echo every one of their IDs back in GET responses.  The
-        // @TestSetup data (Department A/B) also lack Ramp IDs and must be included,
-        // otherwise those records won't match in Phase 4 and would show as failures.
-        Set<String> allUnsyncedIds = new Set<String>();
-        for (AcctSeed__Accounting_Variable__c v : [
-            SELECT Id FROM AcctSeed__Accounting_Variable__c
-            WHERE AcctSeed__Active__c = true
-              AND Ramp_Field_Option_Id__c = null
-              AND AcctSeed__Type__c IN ('GL Account Variable 1', 'GL Account Variable 2',
-                                        'GL Account Variable 3', 'GL Account Variable 4')
-        ]) {
-            allUnsyncedIds.add(v.Id);
+        System.runAs(adminUser) {
+            // Insert one variable of each type without a Ramp ID so both land in the
+            // "to create" path and end up in the same execute() chunk.
+            insert new List<AcctSeed__Accounting_Variable__c>{
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Cost Center X',
+                    AcctSeed__Type__c = 'GL Account Variable 3',
+                    AcctSeed__Active__c = true
+                ),
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Region Y',
+                    AcctSeed__Type__c = 'GL Account Variable 4',
+                    AcctSeed__Active__c = true
+                )
+            };
+
+            // Query ALL active variables that will be processed (no Ramp ID yet) so
+            // the mock can echo every one of their IDs back in GET responses.  The
+            // @TestSetup data (Department A/B) also lack Ramp IDs and must be included,
+            // otherwise those records won't match in Phase 4 and would show as failures.
+            Set<String> allUnsyncedIds = new Set<String>();
+            for (AcctSeed__Accounting_Variable__c v : [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true
+                  AND Ramp_Field_Option_Id__c = null
+                  AND AcctSeed__Type__c IN ('GL Account Variable 1', 'GL Account Variable 2',
+                                            'GL Account Variable 3', 'GL Account Variable 4')
+            ]) {
+                allUnsyncedIds.add(v.Id);
+            }
+
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 1' => 'ramp-field-id-1',
+                'GL Account Variable 2' => 'ramp-field-id-2',
+                'GL Account Variable 3' => 'ramp-field-id-3',
+                'GL Account Variable 4' => 'ramp-field-id-4'
+            };
+
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockWithGet(allUnsyncedIds));
+
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 200);
+            Test.stopTest();
+
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete for multi-type chunk happy path');
+
+            List<AcctSeed__Accounting_Variable__c> stamped = [
+                SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c
+                WHERE Id IN :allUnsyncedIds
+            ];
+            for (AcctSeed__Accounting_Variable__c v : stamped) {
+                System.assertNotEquals(null, v.Ramp_Field_Option_Id__c,
+                    'Phase 4 DML should stamp Ramp_Field_Option_Id__c for each created variable');
+            }
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Succeeded__c, AcctSeed__Failed__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'No failures expected when Ramp returns IDs for all created variables');
+            System.assert((Integer) ajrs[0].AcctSeed__Succeeded__c > 0,
+                'AJR succeeded count should reflect the stamped variables');
         }
+    }
 
-        Map<String, String> fieldNameToRampId = new Map<String, String>{
-            'GL Account Variable 1' => 'ramp-field-id-1',
-            'GL Account Variable 2' => 'ramp-field-id-2',
-            'GL Account Variable 3' => 'ramp-field-id-3',
-            'GL Account Variable 4' => 'ramp-field-id-4'
-        };
+    @IsTest
+    static void testBatchExecution_UpdateSuccess() {
+        // "Location A" was inserted in @TestSetup with Ramp_Field_Option_Id__c = 'existing-ramp-id-123'
+        // and type 'GL Account Variable 2', so it will land in the PATCH (update) path.
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
 
-        Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockWithGet(allUnsyncedIds));
+        System.runAs(adminUser) {
+            // Scope the batch to the update-only path: remove variables without a Ramp ID
+            // (Department A and B from @TestSetup) so only Location A (PATCH) is processed.
+            // Without this, those records go through POST then GET, and the GET mock returns
+            // empty data so they end up counted as errors.
+            delete [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ];
 
-        Test.startTest();
-        RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
-        Id jobId = Database.executeBatch(batch, 200);
-        Test.stopTest();
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 1' => 'ramp-field-id-1',
+                'GL Account Variable 2' => 'ramp-field-id-2',
+                'GL Account Variable 3' => 'ramp-field-id-3',
+                'GL Account Variable 4' => 'ramp-field-id-4'
+            };
 
-        AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
-        System.assertEquals('Completed', job.Status, 'Batch should complete for multi-type chunk happy path');
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockUpdateSuccess());
 
-        // All unsynced variables should now have Ramp IDs stamped.
-        List<AcctSeed__Accounting_Variable__c> stamped = [
-            SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c
-            WHERE Id IN :allUnsyncedIds
-        ];
-        for (AcctSeed__Accounting_Variable__c v : stamped) {
-            System.assertNotEquals(null, v.Ramp_Field_Option_Id__c,
-                'Phase 4 DML should stamp Ramp_Field_Option_Id__c for each created variable');
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 10);
+            Test.stopTest();
+
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete successfully for update path');
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'No errors should be logged when PATCH returns 200: ' + ajrs[0].AcctSeed__Notes__c);
         }
-
-        List<AcctSeed__Automated_Job_Results__c> ajrs = [
-            SELECT AcctSeed__Succeeded__c, AcctSeed__Failed__c
-            FROM AcctSeed__Automated_Job_Results__c
-            WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
-        ];
-        System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
-        System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
-            'No failures expected when Ramp returns IDs for all created variables');
-        System.assert((Integer) ajrs[0].AcctSeed__Succeeded__c > 0,
-            'AJR succeeded count should reflect the stamped variables');
     }
 
     /**
@@ -273,6 +328,33 @@ private class RampFieldOptionsSyncBatchTest {
             res.setHeader('Content-Type', 'application/json');
             res.setStatusCode(400);
             res.setBody('{"error": "Bad Request"}');
+            return res;
+        }
+    }
+
+    /**
+     * Mock for the update-only happy path: PATCH returns 200, POST returns 201,
+     * GET returns an empty page so no stamping is attempted.
+     */
+    private class RampFieldOptionsMockUpdateSuccess implements HttpCalloutMock {
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+            } else if (req.getMethod() == 'PATCH') {
+                res.setStatusCode(200);
+                res.setBody('{"ramp_id": "existing-ramp-id-123", "value": "Location A"}');
+            } else if (req.getMethod() == 'POST') {
+                res.setStatusCode(201);
+                res.setBody('{}');
+            } else if (req.getMethod() == 'GET') {
+                res.setStatusCode(200);
+                res.setBody('{"data":[],"page":{"next":null}}');
+            }
+
             return res;
         }
     }
