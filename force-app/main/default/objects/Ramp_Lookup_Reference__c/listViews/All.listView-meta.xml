@@ -4,6 +4,10 @@
     <columns>Name</columns>
     <columns>Reference__c</columns>
     <columns>GL_Account__c</columns>
+    <columns>GL_Account_Variable_1__c</columns>
+    <columns>GL_Account_Variable_2__c</columns>
+    <columns>GL_Account_Variable_3__c</columns>
+    <columns>GL_Account_Variable_4__c</columns>
     <columns>Override__c</columns>
     <columns>Employee__c</columns>
     <filterScope>Everything</filterScope>
