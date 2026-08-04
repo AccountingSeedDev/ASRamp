@@ -252,19 +252,31 @@ private class RampAuthServiceTest {
     @IsTest
     static void testClearTransactionToken_AllowsFreshFetch() {
         RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
-        RampAuthService.transactionToken = null;
+        // Evict any Org Cache entry that a prior test may have written for this credential,
+        // so the Org Cache is cold when we start.
+        RampAuthService.clearCachedToken();
+        // Pre-seed transactionToken with a stale value — simulates a credential that changed
+        // mid-transaction.  No Org Cache entry exists, so clearing the transaction token
+        // will force an HTTP callout on the next getAccessToken().
+        RampAuthService.transactionToken = 'stale_token_to_be_discarded';
 
         RampAuthCallCountMock countMock = new RampAuthCallCountMock();
         Test.setMock(HttpCalloutMock.class, countMock);
 
         Test.startTest();
-        RampAuthService.getAccessToken(); // populates transactionToken (1 callout)
+        // transactionToken is already set — no callout needed here.
+        String beforeClear = RampAuthService.getAccessToken();
         RampAuthService.clearTransactionToken();
-        RampAuthService.getAccessToken(); // transactionToken cleared — should callout again (2nd callout)
+        // Org Cache is cold, so this must go all the way to HTTP.
+        String afterClear = RampAuthService.getAccessToken();
         Test.stopTest();
 
-        System.assertEquals(2, countMock.callCount,
+        System.assertEquals(1, countMock.callCount,
             'Clearing the transaction token should force a new callout on the next getAccessToken()');
+        System.assertEquals('stale_token_to_be_discarded', beforeClear,
+            'Before clear: should return the pre-seeded transactionToken');
+        System.assertEquals('transaction_cached_token', afterClear,
+            'After clear: should return a freshly fetched token');
     }
 
     @IsTest
