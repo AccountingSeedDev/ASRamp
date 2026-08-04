@@ -10,12 +10,25 @@
  */
 public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, Database.AllowsCallouts, Database.Stateful {
 
+    /**
+     * Ramp's field-options GET accepts page_size 2–100 and defaults to 20. Request the
+     * documented maximum so a chunk's lookup costs as few callouts as possible — Phase 1
+     * can already spend one PATCH per record, and a LimitException is not catchable.
+     */
+    private static final Integer LOOKUP_PAGE_SIZE = 100;
+
+    /** Upper bound on lookup pages per field type (LOOKUP_PAGE_SIZE * this = options scanned). */
+    private static final Integer MAX_LOOKUP_PAGES = 50;
+
     private String accountingConnectionId;
     private Map<String, String> fieldNameToRampId;
     private Integer createdCount = 0;
     private Integer updatedCount = 0;
     private Integer errorCount = 0;
     private List<String> errors = new List<String>();
+    // Non-fatal conditions worth surfacing on the AJR without inflating the failure
+    // count — e.g. a rejected POST that the subsequent lookup recovered from.
+    private List<String> warnings = new List<String>();
 
     /**
      * @description Constructor
@@ -48,7 +61,8 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
      * more than one variable type:
      *   Phase 1 — PATCH callouts for records that already have a Ramp ID (no DML).
      *   Phase 2 — POST callouts to create options for records that lack a Ramp ID (no DML).
-     *   Phase 3 — GET callouts to fetch Ramp IDs for each successfully POSTed type (no DML).
+     *   Phase 3 — GET callouts to fetch Ramp IDs for every type, whether or not its POST
+     *             succeeded, so options already on Ramp are reconciled (no DML).
      *   Phase 4 — single batched DML to stamp all Ramp IDs on SF records.
      */
     public void execute(Database.BatchableContext bc, List<AcctSeed__Accounting_Variable__c> scope) {
@@ -84,6 +98,9 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
         // before touching the database.
         Map<String, String> sfIdToRampId = new Map<String, String>();
         List<AcctSeed__Accounting_Variable__c> candidatesForStamp = new List<AcctSeed__Accounting_Variable__c>();
+        // Field types whose Ramp lookup hit MAX_LOOKUP_PAGES before finding every record,
+        // so Phase 4 can report truncation instead of blaming the POST.
+        Set<String> truncatedLookups = new Set<String>();
 
         for (String fieldType : toCreateByField.keySet()) {
             String rampFieldId = fieldNameToRampId.get(fieldType);
@@ -95,20 +112,37 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                 continue;
             }
 
+            // Phase 2: POST — create options in Ramp (callout only).
+            //
+            // Ramp's POST is all-or-nothing and rejects any option whose id already
+            // exists (DEVELOPER_7020), so the whole type fails whenever Ramp already
+            // holds options for records that are unstamped on our side — the state left
+            // behind by any earlier partial sync. A POST failure is therefore not
+            // conclusive: fall through to the lookup so pre-existing options are still
+            // reconciled and stamped. Phase 4 counts whatever is genuinely missing, so
+            // the record-level counts stay correct either way.
             try {
-                // Phase 2: POST — create options in Ramp (callout only)
                 postFieldOptions(rampFieldId, variables);
+            } catch (Exception e) {
+                warnings.add(fieldType + ': POST rejected (' + e.getMessage() +
+                             ') — reconciling against options already on Ramp');
+            }
 
-                // Phase 3: GET — fetch Ramp IDs for stamping (callout only)
+            // Phase 3: GET — fetch Ramp IDs for stamping (callout only)
+            try {
                 Set<String> sfIds = new Set<String>();
                 for (AcctSeed__Accounting_Variable__c v : variables) {
                     sfIds.add(v.Id);
                 }
-                sfIdToRampId.putAll(fetchRampIds(rampFieldId, sfIds));
+                RampIdLookup lookup = fetchRampIds(rampFieldId, sfIds);
+                sfIdToRampId.putAll(lookup.sfIdToRampId);
+                if (lookup.truncated) {
+                    truncatedLookups.add(fieldType);
+                }
                 candidatesForStamp.addAll(variables);
             } catch (Exception e) {
                 errorCount += variables.size();
-                errors.add('Create ' + fieldType + ': ' + e.getMessage());
+                errors.add('Lookup ' + fieldType + ': ' + e.getMessage());
             }
         }
 
@@ -124,7 +158,13 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                 createdCount++;
             } else {
                 errorCount++;
-                errors.add('Create ' + variable.Name + ': Ramp ID not returned after POST');
+                errors.add('Create ' + variable.Name + ': ' + (
+                    truncatedLookups.contains(variable.AcctSeed__Type__c)
+                        ? 'Ramp option lookup stopped at the ' + MAX_LOOKUP_PAGES +
+                          '-page limit (' + (MAX_LOOKUP_PAGES * LOOKUP_PAGE_SIZE) +
+                          ' options) before this record was found'
+                        : 'Ramp ID not returned after POST'
+                ));
             }
         }
         if (!toStamp.isEmpty()) {
@@ -147,6 +187,9 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
         }
         if (!errors.isEmpty()) {
             notes = RampJobResultLogger.appendNote(notes, 'Error details:\n' + String.join(errors, '\n'));
+        }
+        if (!warnings.isEmpty()) {
+            notes = RampJobResultLogger.appendNote(notes, 'Warnings:\n' + String.join(warnings, '\n'));
         }
 
         RampJobResultLogger.record(
@@ -209,22 +252,42 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     }
 
     /**
+     * @description Result of a paginated field-option lookup: the sfId→rampId pairs
+     * found, plus whether paging stopped early at MAX_LOOKUP_PAGES (so the caller can
+     * distinguish truncation from Ramp genuinely not returning an ID).
+     */
+    private class RampIdLookup {
+        private Map<String, String> sfIdToRampId = new Map<String, String>();
+        private Boolean truncated = false;
+    }
+
+    /**
      * @description Fetch Ramp IDs for the given Salesforce record IDs from the
-     * field-options GET endpoint. Handles Ramp's keyset pagination. Callout only —
-     * no DML; the caller stamps SF records after all callouts complete.
+     * field-options GET endpoint. Callout only — no DML; the caller stamps SF records
+     * after all callouts complete.
+     *
+     * Paging follows Ramp's keyset pagination: page.next carries the complete URL of the
+     * next page, so extractNextCursor() pulls out just the start cursor. Requests
+     * page_size=LOOKUP_PAGE_SIZE (Ramp's documented max) rather than the default 20.
+     * The loop stops early once every requested ID is found, and is bounded at
+     * MAX_LOOKUP_PAGES so a very large option set cannot exhaust the callout limit —
+     * that bound is reported back via RampIdLookup.truncated.
      *
      * @param rampFieldId  Ramp field UUID for the GL Account Variable type
      * @param sfIds        SF record IDs to match against returned `code` values
-     * @return Map from Salesforce Id to Ramp option ID
+     * @return RampIdLookup holding the sfId→rampId pairs and the truncation flag
      */
-    private Map<String, String> fetchRampIds(String rampFieldId, Set<String> sfIds) {
-        Map<String, String> sfIdToRampId = new Map<String, String>();
-        String nextPage = null;
+    private RampIdLookup fetchRampIds(String rampFieldId, Set<String> sfIds) {
+        RampIdLookup result = new RampIdLookup();
+        Map<String, String> sfIdToRampId = result.sfIdToRampId;
+        String nextCursor = null;
+        Integer pageCount = 0;
 
         do {
-            String endpoint = '/developer/v1/accounting/field-options?field_id=' + rampFieldId;
-            if (nextPage != null) {
-                endpoint += '&start=' + nextPage;
+            String endpoint = '/developer/v1/accounting/field-options?field_id=' + rampFieldId +
+                              '&page_size=' + LOOKUP_PAGE_SIZE;
+            if (nextCursor != null) {
+                endpoint += '&start=' + EncodingUtil.urlEncode(nextCursor, 'UTF-8');
             }
 
             HttpResponse res = RampAPIService.get(endpoint);
@@ -244,19 +307,37 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                     }
                 }
 
-                if (response.containsKey('page')) {
-                    Map<String, Object> page = (Map<String, Object>) response.get('page');
-                    nextPage = (String) page.get('next');
-                } else {
-                    nextPage = null;
-                }
+                nextCursor = extractNextCursor(response);
+                pageCount++;
             } else {
                 throw new RampAccountingFieldService.RampAccountingFieldException(
                     'GET field-options failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
                 );
             }
-        } while (nextPage != null);
+        } while (nextCursor != null && sfIdToRampId.size() < sfIds.size() && pageCount < MAX_LOOKUP_PAGES);
 
-        return sfIdToRampId;
+        result.truncated = (nextCursor != null && sfIdToRampId.size() < sfIds.size());
+        return result;
+    }
+
+    /**
+     * @description Pulls the keyset cursor out of Ramp's page.next URL. Ramp returns the
+     * complete URL of the next page (e.g. ".../field-options?field_id=<id>&start=<cursor>"),
+     * so the cursor must be extracted rather than used as-is — passing the whole URL as
+     * `start` makes Ramp reject the request (DEVELOPER_7001 "Not a valid UUID").
+     * @param responseMap The parsed JSON body of a paginated Ramp response
+     * @return String The start cursor for the next page, or null if there is none
+     */
+    private static String extractNextCursor(Map<String, Object> responseMap) {
+        Object pageObj = responseMap.get('page');
+        if (!(pageObj instanceof Map<String, Object>)) return null;
+        String nextUrl = (String) ((Map<String, Object>) pageObj).get('next');
+        if (String.isBlank(nextUrl)) return null;
+        Integer i = nextUrl.indexOf('start=');
+        if (i < 0) return null;
+        String cursor = nextUrl.substring(i + 6);
+        Integer amp = cursor.indexOf('&');
+        if (amp >= 0) cursor = cursor.substring(0, amp);
+        return cursor;
     }
 }

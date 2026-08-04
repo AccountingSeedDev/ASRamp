@@ -305,12 +305,13 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
         }
 
         Map<String, String> sfIdToRampId = new Map<String, String>();
-        String nextPage = null;
+        String nextCursor = null;
+        Integer pageCount = 0;
 
         do {
-            String endpoint = '/developer/v1/accounting/vendors';
-            if (nextPage != null) {
-                endpoint += '?start=' + nextPage;
+            String endpoint = '/developer/v1/accounting/vendors?page_size=100';
+            if (nextCursor != null) {
+                endpoint += '&start=' + EncodingUtil.urlEncode(nextCursor, 'UTF-8');
             }
 
             HttpResponse res = RampAPIService.get(endpoint);
@@ -330,17 +331,13 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
                     }
                 }
 
-                if (response.containsKey('page')) {
-                    Map<String, Object> page = (Map<String, Object>) response.get('page');
-                    nextPage = (String) page.get('next');
-                } else {
-                    nextPage = null;
-                }
+                nextCursor = extractNextCursor(response);
+                pageCount++;
             } else {
                 System.debug('Failed to fetch vendors: ' + res.getStatusCode() + ' - ' + res.getBody());
-                nextPage = null;
+                nextCursor = null;
             }
-        } while (nextPage != null && sfIdToRampId.size() < sfIds.size());
+        } while (String.isNotBlank(nextCursor) && sfIdToRampId.size() < sfIds.size() && pageCount < 50);
 
         List<Account> toStamp = new List<Account>();
         for (Account acc : accounts) {

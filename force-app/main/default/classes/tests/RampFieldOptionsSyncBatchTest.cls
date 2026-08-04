@@ -9,6 +9,14 @@ private class RampFieldOptionsSyncBatchTest {
 
     private static final String TEST_CONNECTION_ID = 'test-connection-12345678-1234-1234-1234-123456789012';
 
+    // Keyset cursor for page 2 of the paginated field-options mock, and the complete
+    // page.next URL Ramp wraps it in. Declared here because Apex inner classes cannot
+    // hold static members.
+    private static final String PAGE_2_CURSOR = 'page2cursor';
+    private static final String PAGE_2_URL =
+        'https://api.ramp.com/developer/v1/accounting/field-options' +
+        '?field_id=ramp-field-id-3&start=' + PAGE_2_CURSOR;
+
     @TestSetup
     static void setup() {
         TestDataFactory.getInstance().initialize();
@@ -254,6 +262,128 @@ private class RampFieldOptionsSyncBatchTest {
     }
 
     @IsTest
+    static void testFetchRampIds_PaginatedGetStampsAllRecords() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            delete [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ];
+
+            insert new List<AcctSeed__Accounting_Variable__c>{
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Page1 Var',
+                    AcctSeed__Type__c = 'GL Account Variable 3',
+                    AcctSeed__Active__c = true
+                ),
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Page2 Var',
+                    AcctSeed__Type__c = 'GL Account Variable 3',
+                    AcctSeed__Active__c = true
+                )
+            };
+
+            List<AcctSeed__Accounting_Variable__c> inserted = [
+                SELECT Id, Name FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Type__c = 'GL Account Variable 3'
+                  AND AcctSeed__Active__c = true
+                ORDER BY Name
+            ];
+            String page1SfId = inserted[0].Id; // 'Page1 Var'
+            String page2SfId = inserted[1].Id; // 'Page2 Var'
+
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 3' => 'ramp-field-id-3'
+            };
+
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockPaginated(page1SfId, page2SfId));
+
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 200);
+            Test.stopTest();
+
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete successfully');
+
+            List<AcctSeed__Accounting_Variable__c> gl3Records = [
+                SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Type__c = 'GL Account Variable 3'
+                  AND AcctSeed__Active__c = true
+            ];
+            for (AcctSeed__Accounting_Variable__c v : gl3Records) {
+                System.assertNotEquals(null, v.Ramp_Field_Option_Id__c,
+                    'All GL Var 3 records must be stamped when Ramp IDs span two GET pages');
+            }
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'No failures expected when pagination is handled correctly');
+        }
+    }
+
+    /**
+     * An org where Ramp already holds the options but the SF records are unstamped —
+     * the state any earlier partial sync leaves behind. Ramp's POST is all-or-nothing
+     * and rejects the batch with DEVELOPER_7020, so the run must fall back to the GET,
+     * stamp the existing options, and report zero failures.
+     */
+    @IsTest
+    static void testExistingRampOptions_PostRejectedStillStampsFromLookup() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            delete [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ];
+
+            AcctSeed__Accounting_Variable__c existing = new AcctSeed__Accounting_Variable__c(
+                Name = 'Already On Ramp',
+                AcctSeed__Type__c = 'GL Account Variable 4',
+                AcctSeed__Active__c = true
+            );
+            insert existing;
+
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 4' => 'ramp-field-id-4'
+            };
+
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockDuplicatePost(existing.Id));
+
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 50);
+            Test.stopTest();
+
+            AcctSeed__Accounting_Variable__c reloaded = [
+                SELECT Ramp_Field_Option_Id__c
+                FROM AcctSeed__Accounting_Variable__c
+                WHERE Id = :existing.Id
+            ];
+            System.assertEquals('ramp-opt-already-on-ramp', reloaded.Ramp_Field_Option_Id__c,
+                'A DEVELOPER_7020 POST rejection must still stamp the option Ramp already holds');
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'A recovered POST rejection must not be counted as a failure');
+            System.assert(ajrs[0].AcctSeed__Notes__c.contains('DEVELOPER_7020'),
+                'The rejected POST should still be surfaced as a warning on the AJR: ' + ajrs[0].AcctSeed__Notes__c);
+        }
+    }
+
+    @IsTest
     static void testBatchExecution_UpdateSuccess() {
         // "Location A" was inserted in @TestSetup with Ramp_Field_Option_Id__c = 'existing-ramp-id-123'
         // and type 'GL Account Variable 2', so it will land in the PATCH (update) path.
@@ -403,6 +533,101 @@ private class RampFieldOptionsSyncBatchTest {
                 };
                 res.setStatusCode(200);
                 res.setBody(JSON.serialize(body));
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * Ramp already holds the option, so the all-or-nothing POST is rejected with
+     * DEVELOPER_7020 while the GET happily returns the existing option.
+     */
+    private class RampFieldOptionsMockDuplicatePost implements HttpCalloutMock {
+        private String sfId;
+
+        public RampFieldOptionsMockDuplicatePost(String sfId) {
+            this.sfId = sfId;
+        }
+
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            String endpoint = req.getEndpoint();
+
+            if (endpoint.contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+            } else if (req.getMethod() == 'POST' && endpoint.contains('field-options')) {
+                res.setStatusCode(400);
+                res.setBody('{"error":{"code":"DEVELOPER_7020","message":"Failed to upload custom field options: ' +
+                            'an option with the same id already exists"}}');
+            } else if (req.getMethod() == 'GET' && endpoint.contains('field-options')) {
+                res.setStatusCode(200);
+                res.setBody('{"data": [{"ramp_id": "ramp-opt-already-on-ramp", "code": "' + sfId + '"}],' +
+                            ' "page": {"next": null}}');
+            } else {
+                res.setStatusCode(200);
+                res.setBody('{}');
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * Two-page field-options GET. Page 1 returns page1SfId and a `page.next` holding the
+     * COMPLETE next-page URL (as Ramp really does); page 2 returns page2SfId and a null
+     * `next`.
+     *
+     * The mock validates the `start` value the way Ramp does: only the bare cursor token
+     * is accepted, and anything else — notably the whole page.next URL — gets the real
+     * DEVELOPER_7001 "Not a valid UUID" 400. Without that check the test passes against
+     * the pre-fix code, because a verbatim page.next URL still contains "start=".
+     */
+    private class RampFieldOptionsMockPaginated implements HttpCalloutMock {
+        private String page1SfId;
+        private String page2SfId;
+
+        public RampFieldOptionsMockPaginated(String page1SfId, String page2SfId) {
+            this.page1SfId = page1SfId;
+            this.page2SfId = page2SfId;
+        }
+
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            String endpoint = req.getEndpoint();
+            String method = req.getMethod();
+
+            if (endpoint.contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+            } else if (method == 'POST') {
+                res.setStatusCode(201);
+                res.setBody('{}');
+            } else if (method == 'GET' && endpoint.contains('field-options')) {
+                String startValue = endpoint.contains('start=')
+                    ? endpoint.substringAfter('start=').substringBefore('&')
+                    : null;
+
+                if (startValue != null && startValue != PAGE_2_CURSOR) {
+                    // Exactly what Ramp returns when `start` isn't a bare cursor token.
+                    res.setStatusCode(400);
+                    res.setBody('{"error":{"code":"DEVELOPER_7001","message":"Not a valid UUID: ' + startValue + '"}}');
+                    return res;
+                }
+
+                Boolean isPage2 = (startValue == PAGE_2_CURSOR);
+                String sfId = isPage2 ? page2SfId : page1SfId;
+                String nextValue = isPage2 ? 'null' : '"' + PAGE_2_URL + '"';
+                res.setStatusCode(200);
+                res.setBody('{"data": [{"ramp_id": "ramp-opt-' + sfId + '", "code": "' + sfId + '"}], "page": {"next": ' + nextValue + '}}');
+            } else {
+                res.setStatusCode(200);
+                res.setBody('{}');
             }
 
             return res;
