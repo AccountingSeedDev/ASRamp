@@ -46,17 +46,18 @@ public with sharing class RampSyncSettingsService {
             return cachedSettings;
         }
 
-        // Prefer the org-level override (NamespacePrefix = null) over the packaged
-        // default (NamespacePrefix = 'AcctSeedRamp'). When both share DeveloperName
-        // 'Default', LIMIT 1 without an ORDER BY clause can resolve to either row,
-        // so we query explicitly for the org override first.
+        // Prefer the org-level override over the packaged default. The org-level
+        // record has DeveloperName 'Default' and NamespacePrefix = null or '' (the
+        // platform may store it as either). The packaged default has NamespacePrefix
+        // = 'AcctSeedRamp'. Query each separately so we never accidentally resolve
+        // to the packaged default when an org override is present.
         List<Ramp_Sync_Settings__mdt> orgOverride = [
             SELECT Default_Ledger__c, Default_JE_Status__c, Sync_Grouping__c, Send_Sync_Ack__c,
                    Vendor_Match_Requires_Payment_History__c,
                    Enable_Reference_Lookup__c, Reference_Key_Template__c
             FROM Ramp_Sync_Settings__mdt
             WHERE DeveloperName = 'Default'
-              AND NamespacePrefix = null
+              AND (NamespacePrefix = null OR NamespacePrefix = '')
             LIMIT 1
         ];
 
@@ -71,6 +72,7 @@ public with sharing class RampSyncSettingsService {
                    Enable_Reference_Lookup__c, Reference_Key_Template__c
             FROM Ramp_Sync_Settings__mdt
             WHERE DeveloperName = 'Default'
+              AND NamespacePrefix = 'AcctSeedRamp'
             LIMIT 1
         ];
 

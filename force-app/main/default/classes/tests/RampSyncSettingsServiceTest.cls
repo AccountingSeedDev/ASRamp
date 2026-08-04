@@ -151,4 +151,54 @@ private class RampSyncSettingsServiceTest {
         System.assertEquals('ExtIdTest-Ledger', refreshed.AcctSeed__ExtId__c,
             'Name is stamped into the blank External Id so later lookups use the unique key');
     }
+
+    @IsTest
+    static void getSettings_orgOverride_referenceLookupPropagates() {
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Enable_Reference_Lookup__c = true,
+            Reference_Key_Template__c = '{merchant_name}'
+        );
+        RampSyncSettingsService.resetCache();
+
+        Ramp_Sync_Settings__mdt settings;
+        Boolean refEnabled;
+        String refTemplate;
+
+        Test.startTest();
+        settings = RampSyncSettingsService.getSettings();
+        refEnabled = RampSyncSettingsService.referenceLookupEnabled();
+        refTemplate = RampSyncSettingsService.getReferenceKeyTemplate();
+        Test.stopTest();
+
+        System.assertEquals(true, settings.Enable_Reference_Lookup__c,
+            'getSettings() Enable_Reference_Lookup__c should be true when override sets it true');
+        System.assertEquals('{merchant_name}', settings.Reference_Key_Template__c,
+            'getSettings() Reference_Key_Template__c should match the override value');
+        System.assertEquals(true, refEnabled,
+            'referenceLookupEnabled() should return true when Enable_Reference_Lookup__c is true');
+        System.assertEquals('{merchant_name}', refTemplate,
+            'getReferenceKeyTemplate() should return the override template string');
+    }
+
+    @IsTest
+    static void getSettings_noOrgOverride_referenceLookupDisabled() {
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Enable_Reference_Lookup__c = false,
+            Reference_Key_Template__c = null
+        );
+        RampSyncSettingsService.resetCache();
+
+        Boolean refEnabled;
+        String refTemplate;
+
+        Test.startTest();
+        refEnabled = RampSyncSettingsService.referenceLookupEnabled();
+        refTemplate = RampSyncSettingsService.getReferenceKeyTemplate();
+        Test.stopTest();
+
+        System.assertEquals(false, refEnabled,
+            'referenceLookupEnabled() should return false when Enable_Reference_Lookup__c is false');
+        System.assertEquals(null, refTemplate,
+            'getReferenceKeyTemplate() should return null when Reference_Key_Template__c is null');
+    }
 }
