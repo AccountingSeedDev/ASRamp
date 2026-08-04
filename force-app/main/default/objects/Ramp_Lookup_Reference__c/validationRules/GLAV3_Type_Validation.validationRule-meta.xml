@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<ValidationRule xmlns="http://soap.sforce.com/2006/04/metadata">
-    <fullName>GLAV3_Type_Validation</fullName>
-    <active>true</active>
-    <description>Ensures GL Account Variable 3 is of type GL Account Variable 3.</description>
-    <errorConditionFormula>AND(NOT(ISBLANK(GL_Account_Variable_3__c)), GL_Account_Variable_3__r.AcctSeed__Type__c &lt;&gt; "GL Account Variable 3")</errorConditionFormula>
-    <errorDisplayField>GL_Account_Variable_3__c</errorDisplayField>
-    <errorMessage>GL Account Variable 3 must be of type GL Account Variable 3.</errorMessage>
-</ValidationRule>
