@@ -225,6 +225,85 @@ private class RampAuthServiceTest {
         System.assert(!invalidResponse.isValid(), 'Token without access_token should be invalid');
     }
 
+    @IsTest
+    static void testGetAccessToken_TransactionCachePreventsDuplicateCallout() {
+        // Arrange: inject credential so the callout path is exercised.
+        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
+        // Ensure no stale transaction token from a previous test.
+        RampAuthService.transactionToken = null;
+
+        // The mock counts how many times it is called.
+        RampAuthCallCountMock countMock = new RampAuthCallCountMock();
+        Test.setMock(HttpCalloutMock.class, countMock);
+
+        Test.startTest();
+        String firstToken  = RampAuthService.getAccessToken();
+        String secondToken = RampAuthService.getAccessToken();
+        String thirdToken  = RampAuthService.getAccessToken();
+        Test.stopTest();
+
+        System.assertEquals(1, countMock.callCount,
+            'Only one HTTP callout should occur; subsequent calls must use transactionToken');
+        System.assertEquals(firstToken, secondToken, 'All calls must return the same token');
+        System.assertEquals(firstToken, thirdToken,  'All calls must return the same token');
+        System.assertEquals('transaction_cached_token', firstToken, 'Token value should match mock');
+    }
+
+    @IsTest
+    static void testClearTransactionToken_AllowsFreshFetch() {
+        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
+        RampAuthService.transactionToken = null;
+
+        RampAuthCallCountMock countMock = new RampAuthCallCountMock();
+        Test.setMock(HttpCalloutMock.class, countMock);
+
+        Test.startTest();
+        RampAuthService.getAccessToken(); // populates transactionToken (1 callout)
+        RampAuthService.clearTransactionToken();
+        RampAuthService.getAccessToken(); // transactionToken cleared — should callout again (2nd callout)
+        Test.stopTest();
+
+        System.assertEquals(2, countMock.callCount,
+            'Clearing the transaction token should force a new callout on the next getAccessToken()');
+    }
+
+    @IsTest
+    static void testClearCachedToken_AlsoClearsTransactionToken() {
+        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
+        // Seed a non-blank transaction token directly via the @TestVisible field.
+        RampAuthService.transactionToken = 'seeded_token';
+
+        Test.startTest();
+        RampAuthService.clearCachedToken();
+        Test.stopTest();
+
+        System.assertEquals(null, RampAuthService.transactionToken,
+            'clearCachedToken() must also null out transactionToken');
+    }
+
+    @IsTest
+    static void testGetAccessToken_TransactionTokenPreemptsCacheCallout() {
+        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
+        // Pre-populate the transaction token to simulate a second batch-execute chunk.
+        RampAuthService.transactionToken = 'preloaded_token';
+
+        // If getAccessToken() ignores transactionToken it would attempt a callout;
+        // Salesforce would throw "callout not allowed after DML" — but more
+        // importantly it would be a wasted callout. Using a CountMock ensures zero
+        // callouts are made.
+        RampAuthCallCountMock countMock = new RampAuthCallCountMock();
+        Test.setMock(HttpCalloutMock.class, countMock);
+
+        Test.startTest();
+        String token = RampAuthService.getAccessToken();
+        Test.stopTest();
+
+        System.assertEquals(0, countMock.callCount,
+            'No callout should occur when transactionToken is already set');
+        System.assertEquals('preloaded_token', token,
+            'Should return the cached transaction token');
+    }
+
     /**
      * @description Mock class for successful OAuth response
      */
@@ -295,6 +374,26 @@ private class RampAuthServiceTest {
             res.setStatusCode(502);
             res.setHeader('Content-Type', 'text/html');
             res.setBody('<!DOCTYPE html><html lang=en><title>| 502: Bad gateway</title><body>Bad gateway</body></html>');
+            return res;
+        }
+    }
+
+    /**
+     * @description Counts how many times it is invoked and always returns a valid
+     * token response.  Used to assert the number of HTTP callouts made during a test.
+     */
+    private class RampAuthCallCountMock implements HttpCalloutMock {
+        public Integer callCount = 0;
+        public HttpResponse respond(HttpRequest req) {
+            callCount++;
+            HttpResponse res = new HttpResponse();
+            res.setStatusCode(200);
+            res.setHeader('Content-Type', 'application/json');
+            res.setBody(JSON.serialize(new Map<String, Object>{
+                'access_token' => 'transaction_cached_token',
+                'token_type'   => 'Bearer',
+                'expires_in'   => 864000
+            }));
             return res;
         }
     }
