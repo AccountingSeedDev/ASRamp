@@ -69,10 +69,22 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
         }
 
         // ── Phase 1: PATCH updates (callouts only, no DML) ──
+        // Track stale IDs re-routed to the create path so Phase 4 can clear them if GET finds nothing.
+        Set<String> staleIds = new Set<String>();
         for (AcctSeed__Accounting_Variable__c variable : toUpdate) {
             try {
-                updateFieldOption(variable);
-                updatedCount++;
+                Boolean updated = updateFieldOption(variable);
+                if (updated) {
+                    updatedCount++;
+                } else {
+                    // Stale Ramp ID (404) — re-route through create path so POST+GET stamps the new ID
+                    staleIds.add(variable.Id);
+                    String fieldType = variable.AcctSeed__Type__c;
+                    if (!toCreateByField.containsKey(fieldType)) {
+                        toCreateByField.put(fieldType, new List<AcctSeed__Accounting_Variable__c>());
+                    }
+                    toCreateByField.get(fieldType).add(variable);
+                }
             } catch (Exception e) {
                 errorCount++;
                 errors.add('Update ' + variable.Name + ': ' + e.getMessage());
@@ -80,8 +92,6 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
         }
 
         // ── Phases 2 & 3: POST creates then GET Ramp IDs (all callouts, no DML) ──
-        // Accumulate sfId→rampId pairs and the candidate records across all types
-        // before touching the database.
         Map<String, String> sfIdToRampId = new Map<String, String>();
         List<AcctSeed__Accounting_Variable__c> candidatesForStamp = new List<AcctSeed__Accounting_Variable__c>();
 
@@ -112,7 +122,8 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
             }
         }
 
-        // ── Phase 4: DML — stamp all Ramp IDs in one operation ──
+        // ── Phase 4: DML — stamp new Ramp IDs, and clear stale ones that weren't re-stamped ──
+        Set<String> stampedIds = new Set<String>();
         List<AcctSeed__Accounting_Variable__c> toStamp = new List<AcctSeed__Accounting_Variable__c>();
         for (AcctSeed__Accounting_Variable__c variable : candidatesForStamp) {
             String rampId = sfIdToRampId.get(variable.Id);
@@ -121,10 +132,22 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                     Id = variable.Id,
                     Ramp_Field_Option_Id__c = rampId
                 ));
+                stampedIds.add(variable.Id);
                 createdCount++;
-            } else {
+            } else if (!staleIds.contains(variable.Id)) {
                 errorCount++;
                 errors.add('Create ' + variable.Name + ': Ramp ID not returned after POST');
+            }
+        }
+        // Clear stale IDs for records that went through POST+GET but still weren't found in Ramp
+        for (AcctSeed__Accounting_Variable__c variable : candidatesForStamp) {
+            if (staleIds.contains(variable.Id) && !stampedIds.contains(variable.Id)) {
+                toStamp.add(new AcctSeed__Accounting_Variable__c(
+                    Id = variable.Id,
+                    Ramp_Field_Option_Id__c = null
+                ));
+                errorCount++;
+                errors.add('Stale re-route ' + variable.Name + ': Ramp ID not returned after POST+GET — stale ID cleared');
             }
         }
         if (!toStamp.isEmpty()) {
@@ -159,8 +182,9 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     /**
      * @description PATCH an existing field option in Ramp. Callout only — no DML.
      * @param variable The accounting variable to update
+     * @return true if the update succeeded (200), false if the Ramp ID is stale (404)
      */
-    private void updateFieldOption(AcctSeed__Accounting_Variable__c variable) {
+    private Boolean updateFieldOption(AcctSeed__Accounting_Variable__c variable) {
         Map<String, Object> requestBody = new Map<String, Object>{
             'value' => variable.Name,
             'is_active' => variable.AcctSeed__Active__c
@@ -171,11 +195,15 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
 
         HttpResponse res = RampAPIService.patch(endpoint, body);
 
-        if (res.getStatusCode() != 200) {
-            throw new RampAccountingFieldService.RampAccountingFieldException(
-                'PATCH failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
-            );
+        if (res.getStatusCode() == 200) {
+            return true;
         }
+        if (res.getStatusCode() == 404) {
+            return false;
+        }
+        throw new RampAccountingFieldService.RampAccountingFieldException(
+            'PATCH failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
+        );
     }
 
     /**
@@ -201,11 +229,16 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
 
         HttpResponse res = RampAPIService.post('/developer/v1/accounting/field-options', JSON.serialize(requestBody));
 
-        if (res.getStatusCode() != 200 && res.getStatusCode() != 201) {
-            throw new RampAccountingFieldService.RampAccountingFieldException(
-                'POST failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
-            );
+        if (res.getStatusCode() == 200 || res.getStatusCode() == 201) {
+            return;
         }
+        if (res.getStatusCode() == 400 && res.getBody().contains('DEVELOPER_7020')) {
+            // Options already exist in Ramp; proceed to GET phase to stamp Ramp_Field_Option_Id__c
+            return;
+        }
+        throw new RampAccountingFieldService.RampAccountingFieldException(
+            'POST failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
+        );
     }
 
     /**

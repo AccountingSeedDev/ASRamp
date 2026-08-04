@@ -127,6 +127,122 @@ private class RampFieldOptionsSyncBatchTest {
     }
 
     @IsTest
+    static void testBatchExecution_DuplicateIdError() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            // Collect unsynced variable IDs so the GET mock can echo them back
+            Set<String> unsyncedIds = new Set<String>();
+            for (AcctSeed__Accounting_Variable__c v : [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ]) {
+                unsyncedIds.add(v.Id);
+            }
+
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 1' => 'ramp-field-id-1',
+                'GL Account Variable 2' => 'ramp-field-id-2'
+            };
+
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockDuplicateId(unsyncedIds));
+
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 10);
+            Test.stopTest();
+
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete when DEVELOPER_7020 is returned');
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Should log one AJR');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'DEVELOPER_7020 should not count as an error: ' + ajrs[0].AcctSeed__Notes__c);
+        }
+    }
+
+    @IsTest
+    static void testBatchExecution_StaleRampId() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            // Delete unsynced variables so only Location A (has Ramp ID) is processed
+            delete [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ];
+
+            AcctSeed__Accounting_Variable__c staleVar = [
+                SELECT Id, Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c
+                WHERE Name = 'Location A' LIMIT 1
+            ];
+
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 2' => 'ramp-field-id-2'
+            };
+
+            // Mock: PATCH returns 404 (stale), POST returns 201, GET returns empty (new ID not found)
+            // -> stale ID should be cleared
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMock404());
+
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 10);
+            Test.stopTest();
+
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete when PATCH returns 404');
+
+            AcctSeed__Accounting_Variable__c updated = [
+                SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c WHERE Id = :staleVar.Id
+            ];
+            System.assertEquals(null, updated.Ramp_Field_Option_Id__c,
+                'Stale Ramp ID should be cleared when PATCH 404 and GET finds nothing');
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log one AJR');
+            System.assertEquals(1, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'Stale re-route with no GET result should be counted as a failure: ' + ajrs[0].AcctSeed__Notes__c);
+        }
+    }
+
+    @IsTest
+    static void testValidationRule_BlockDeleteOfSyncedVariable() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            AcctSeed__Accounting_Variable__c syncedVar = [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE Name = 'Location A' LIMIT 1
+            ];
+
+            try {
+                delete syncedVar;
+                System.assert(false, 'Expected DmlException — validation rule should block delete');
+            } catch (DmlException e) {
+                System.assert(
+                    e.getMessage().contains('synced to Ramp'),
+                    'Error message should indicate the variable is synced: ' + e.getMessage()
+                );
+            }
+
+            List<AcctSeed__Accounting_Variable__c> stillExists = [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c WHERE Id = :syncedVar.Id
+            ];
+            System.assertEquals(1, stillExists.size(), 'Synced variable should still exist after blocked delete');
+        }
+    }
+
+    @IsTest
     static void testBatchExecution_MultipleTypes() {
         User adminUser = TestDataFactory.getInstance().getAdminUser();
 
@@ -347,6 +463,84 @@ private class RampFieldOptionsSyncBatchTest {
             } else if (req.getMethod() == 'PATCH') {
                 res.setStatusCode(200);
                 res.setBody('{"ramp_id": "existing-ramp-id-123", "value": "Location A"}');
+            } else if (req.getMethod() == 'POST') {
+                res.setStatusCode(201);
+                res.setBody('{}');
+            } else if (req.getMethod() == 'GET') {
+                res.setStatusCode(200);
+                res.setBody('{"data":[],"page":{"next":null}}');
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * Mock: POST returns 400 DEVELOPER_7020; GET echoes back SF IDs so Phase 4 stamps them.
+     */
+    private class RampFieldOptionsMockDuplicateId implements HttpCalloutMock {
+        private Set<String> sfIds;
+
+        public RampFieldOptionsMockDuplicateId(Set<String> sfIds) {
+            this.sfIds = sfIds;
+        }
+
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+                return res;
+            }
+
+            if (req.getMethod() == 'PATCH') {
+                res.setStatusCode(200);
+                res.setBody('{"ramp_id": "existing-ramp-id-123", "value": "Location A"}');
+            } else if (req.getMethod() == 'POST') {
+                res.setStatusCode(400);
+                res.setBody('{"error_code": "DEVELOPER_7020", "message": "custom field option with the same id already exists"}');
+            } else if (req.getMethod() == 'GET') {
+                // Echo SF IDs back with synthetic Ramp IDs so Phase 4 stamps them
+                List<Object> data = new List<Object>();
+                Integer idx = 0;
+                for (String sfId : sfIds) {
+                    data.add(new Map<String, Object>{
+                        'ramp_id' => 'ramp-option-' + (++idx),
+                        'code' => sfId,
+                        'value' => 'Option ' + idx
+                    });
+                }
+                Map<String, Object> body = new Map<String, Object>{
+                    'data' => data,
+                    'page' => new Map<String, Object>{ 'next' => null }
+                };
+                res.setStatusCode(200);
+                res.setBody(JSON.serialize(body));
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * Mock: PATCH returns 404 (stale ID); POST returns 201; GET returns empty data.
+     */
+    private class RampFieldOptionsMock404 implements HttpCalloutMock {
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+                return res;
+            }
+
+            if (req.getMethod() == 'PATCH') {
+                res.setStatusCode(404);
+                res.setBody('{"error": "Not Found"}');
             } else if (req.getMethod() == 'POST') {
                 res.setStatusCode(201);
                 res.setBody('{}');

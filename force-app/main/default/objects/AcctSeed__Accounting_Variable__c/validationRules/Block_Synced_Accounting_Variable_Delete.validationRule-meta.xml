@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ValidationRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Block_Synced_Accounting_Variable_Delete</fullName>
+    <active>true</active>
+    <description>Prevents deletion of Accounting Variables that have been synced to Ramp. Ramp_Field_Option_Id__c is populated when the variable has been synced.</description>
+    <errorConditionFormula>NOT(ISBLANK(Ramp_Field_Option_Id__c))</errorConditionFormula>
+    <errorMessage>This Accounting Variable has been synced to Ramp and cannot be deleted. Please deactivate it instead or remove it from Ramp first.</errorMessage>
+</ValidationRule>
