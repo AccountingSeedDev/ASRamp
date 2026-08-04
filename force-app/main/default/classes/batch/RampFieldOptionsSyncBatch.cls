@@ -26,6 +26,9 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
     private Integer updatedCount = 0;
     private Integer errorCount = 0;
     private List<String> errors = new List<String>();
+    // Non-fatal conditions worth surfacing on the AJR without inflating the failure
+    // count — e.g. a rejected POST that the subsequent lookup recovered from.
+    private List<String> warnings = new List<String>();
 
     /**
      * @description Constructor
@@ -58,7 +61,8 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
      * more than one variable type:
      *   Phase 1 — PATCH callouts for records that already have a Ramp ID (no DML).
      *   Phase 2 — POST callouts to create options for records that lack a Ramp ID (no DML).
-     *   Phase 3 — GET callouts to fetch Ramp IDs for each successfully POSTed type (no DML).
+     *   Phase 3 — GET callouts to fetch Ramp IDs for every type, whether or not its POST
+     *             succeeded, so options already on Ramp are reconciled (no DML).
      *   Phase 4 — single batched DML to stamp all Ramp IDs on SF records.
      */
     public void execute(Database.BatchableContext bc, List<AcctSeed__Accounting_Variable__c> scope) {
@@ -108,11 +112,24 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                 continue;
             }
 
+            // Phase 2: POST — create options in Ramp (callout only).
+            //
+            // Ramp's POST is all-or-nothing and rejects any option whose id already
+            // exists (DEVELOPER_7020), so the whole type fails whenever Ramp already
+            // holds options for records that are unstamped on our side — the state left
+            // behind by any earlier partial sync. A POST failure is therefore not
+            // conclusive: fall through to the lookup so pre-existing options are still
+            // reconciled and stamped. Phase 4 counts whatever is genuinely missing, so
+            // the record-level counts stay correct either way.
             try {
-                // Phase 2: POST — create options in Ramp (callout only)
                 postFieldOptions(rampFieldId, variables);
+            } catch (Exception e) {
+                warnings.add(fieldType + ': POST rejected (' + e.getMessage() +
+                             ') — reconciling against options already on Ramp');
+            }
 
-                // Phase 3: GET — fetch Ramp IDs for stamping (callout only)
+            // Phase 3: GET — fetch Ramp IDs for stamping (callout only)
+            try {
                 Set<String> sfIds = new Set<String>();
                 for (AcctSeed__Accounting_Variable__c v : variables) {
                     sfIds.add(v.Id);
@@ -125,7 +142,7 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                 candidatesForStamp.addAll(variables);
             } catch (Exception e) {
                 errorCount += variables.size();
-                errors.add('Create ' + fieldType + ': ' + e.getMessage());
+                errors.add('Lookup ' + fieldType + ': ' + e.getMessage());
             }
         }
 
@@ -170,6 +187,9 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
         }
         if (!errors.isEmpty()) {
             notes = RampJobResultLogger.appendNote(notes, 'Error details:\n' + String.join(errors, '\n'));
+        }
+        if (!warnings.isEmpty()) {
+            notes = RampJobResultLogger.appendNote(notes, 'Warnings:\n' + String.join(warnings, '\n'));
         }
 
         RampJobResultLogger.record(

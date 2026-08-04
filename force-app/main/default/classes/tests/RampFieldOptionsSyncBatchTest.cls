@@ -328,6 +328,61 @@ private class RampFieldOptionsSyncBatchTest {
         }
     }
 
+    /**
+     * An org where Ramp already holds the options but the SF records are unstamped —
+     * the state any earlier partial sync leaves behind. Ramp's POST is all-or-nothing
+     * and rejects the batch with DEVELOPER_7020, so the run must fall back to the GET,
+     * stamp the existing options, and report zero failures.
+     */
+    @IsTest
+    static void testExistingRampOptions_PostRejectedStillStampsFromLookup() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            delete [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ];
+
+            AcctSeed__Accounting_Variable__c existing = new AcctSeed__Accounting_Variable__c(
+                Name = 'Already On Ramp',
+                AcctSeed__Type__c = 'GL Account Variable 4',
+                AcctSeed__Active__c = true
+            );
+            insert existing;
+
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 4' => 'ramp-field-id-4'
+            };
+
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockDuplicatePost(existing.Id));
+
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 50);
+            Test.stopTest();
+
+            AcctSeed__Accounting_Variable__c reloaded = [
+                SELECT Ramp_Field_Option_Id__c
+                FROM AcctSeed__Accounting_Variable__c
+                WHERE Id = :existing.Id
+            ];
+            System.assertEquals('ramp-opt-already-on-ramp', reloaded.Ramp_Field_Option_Id__c,
+                'A DEVELOPER_7020 POST rejection must still stamp the option Ramp already holds');
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'A recovered POST rejection must not be counted as a failure');
+            System.assert(ajrs[0].AcctSeed__Notes__c.contains('DEVELOPER_7020'),
+                'The rejected POST should still be surfaced as a warning on the AJR: ' + ajrs[0].AcctSeed__Notes__c);
+        }
+    }
+
     @IsTest
     static void testBatchExecution_UpdateSuccess() {
         // "Location A" was inserted in @TestSetup with Ramp_Field_Option_Id__c = 'existing-ramp-id-123'
@@ -478,6 +533,43 @@ private class RampFieldOptionsSyncBatchTest {
                 };
                 res.setStatusCode(200);
                 res.setBody(JSON.serialize(body));
+            }
+
+            return res;
+        }
+    }
+
+    /**
+     * Ramp already holds the option, so the all-or-nothing POST is rejected with
+     * DEVELOPER_7020 while the GET happily returns the existing option.
+     */
+    private class RampFieldOptionsMockDuplicatePost implements HttpCalloutMock {
+        private String sfId;
+
+        public RampFieldOptionsMockDuplicatePost(String sfId) {
+            this.sfId = sfId;
+        }
+
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            String endpoint = req.getEndpoint();
+
+            if (endpoint.contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+            } else if (req.getMethod() == 'POST' && endpoint.contains('field-options')) {
+                res.setStatusCode(400);
+                res.setBody('{"error":{"code":"DEVELOPER_7020","message":"Failed to upload custom field options: ' +
+                            'an option with the same id already exists"}}');
+            } else if (req.getMethod() == 'GET' && endpoint.contains('field-options')) {
+                res.setStatusCode(200);
+                res.setBody('{"data": [{"ramp_id": "ramp-opt-already-on-ramp", "code": "' + sfId + '"}],' +
+                            ' "page": {"next": null}}');
+            } else {
+                res.setStatusCode(200);
+                res.setBody('{}');
             }
 
             return res;
