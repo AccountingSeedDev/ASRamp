@@ -125,6 +125,7 @@ public with sharing class RampBillBuilder {
         }
         Map<String, Id> glByUuid = resolveGLs(glUuids);
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid = resolveVariables(varUuids);
+        Set<String> inactiveVarUuids = findInactiveVarUuids(varUuids, varByUuid.keySet());
 
         // 2. Resolve vendors (auto-create) → native vendor id -> Account Id.
         List<BillVendor> vendors = new List<BillVendor>();
@@ -140,7 +141,7 @@ public with sharing class RampBillBuilder {
         // 4. Per-bill build.
         for (Bill b : bills) {
             try {
-                result.successful.add(buildOne(b, vendorByNativeId, glByUuid, varByUuid, periodByDate, ledgerId, suspenseGLId, bankGLId));
+                result.successful.add(buildOne(b, vendorByNativeId, glByUuid, varByUuid, inactiveVarUuids, periodByDate, ledgerId, suspenseGLId, bankGLId));
             } catch (BuildException e) {
                 result.failed.put(b.id, e.getMessage());
             }
@@ -150,8 +151,8 @@ public with sharing class RampBillBuilder {
 
     private static PayableBuild buildOne(
         Bill b, Map<String, Id> vendorByNativeId, Map<String, Id> glByUuid,
-        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Map<Date, Id> periodByDate,
-        Id ledgerId, Id suspenseGLId, Id bankGLId
+        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Set<String> inactiveVarUuids,
+        Map<Date, Id> periodByDate, Id ledgerId, Id suspenseGLId, Id bankGLId
     ) {
         if (String.isBlank(b.id)) throw new BuildException('Bill missing id');
 
@@ -180,6 +181,9 @@ public with sharing class RampBillBuilder {
         ap.AcctSeed__Payee_Reference__c = b.invoice_number;
         ap.Ramp_Entity_Id__c = b.entity_id;
         ap.Ramp_Sync_Status__c = 'Pending';
+        if (b.amount != null && String.isNotBlank(b.amount.currency_code)) {
+            ap.put('CurrencyIsoCode', b.amount.currency_code);
+        }
         pb.header = ap;
 
         // Lines: one per bill line_item; fall back to a single line from bill.amount.
@@ -188,12 +192,12 @@ public with sharing class RampBillBuilder {
                 BillLineItem li = b.line_items[i];
                 Decimal amt = (li.amount != null) ? li.amount.toDecimal() : null;
                 if (amt == null) throw new BuildException('Line item ' + i + ' has no amount');
-                pb.lines.add(buildLine(b, li.accounting_field_selections, amt, li.memo, i, glByUuid, varByUuid, suspenseGLId));
+                pb.lines.add(buildLine(b, li.accounting_field_selections, amt, li.memo, i, billDate, glByUuid, varByUuid, inactiveVarUuids, suspenseGLId));
             }
         } else {
             Decimal amt = (b.amount != null) ? b.amount.toDecimal() : null;
             if (amt == null) throw new BuildException('Bill has no amount and no line items');
-            pb.lines.add(buildLine(b, b.accounting_field_selections, amt, b.memo, 0, glByUuid, varByUuid, suspenseGLId));
+            pb.lines.add(buildLine(b, b.accounting_field_selections, amt, b.memo, 0, billDate, glByUuid, varByUuid, inactiveVarUuids, suspenseGLId));
         }
 
         // ---- Payment stage: paid bill → Cash Disbursement + AP Disbursement ----
@@ -219,6 +223,9 @@ public with sharing class RampBillBuilder {
                 cd.AcctSeed__Status__c = 'In Process';
                 cd.AcctSeed__Type__c = mapPayType(b.payment != null ? b.payment.payment_method : null);
                 cd.Ramp_Sync_Status__c = 'Pending';
+                if (b.amount != null && String.isNotBlank(b.amount.currency_code)) {
+                    cd.put('CurrencyIsoCode', b.amount.currency_code);
+                }
                 pb.cashDisbursement = cd;
 
                 AcctSeed__AP_Disbursement__c apd = new AcctSeed__AP_Disbursement__c();
@@ -236,16 +243,18 @@ public with sharing class RampBillBuilder {
 
     /** Map Ramp payment_method to the AS Cash Disbursement Type picklist. */
     private static String mapPayType(String paymentMethod) {
-        if (paymentMethod == 'CHECK') return 'Check';
+        if (paymentMethod != null && paymentMethod.equalsIgnoreCase('CHECK')) return 'Check';
         return 'Electronic';
     }
 
     private static AcctSeed__Account_Payable_Line__c buildLine(
         Bill b, List<BillFieldSelection> lineSelections, Decimal amount, String memo, Integer ordinal,
-        Map<String, Id> glByUuid, Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Id suspenseGLId
+        Date billDate, Map<String, Id> glByUuid, Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+        Set<String> inactiveVarUuids, Id suspenseGLId
     ) {
         AcctSeed__Account_Payable_Line__c line = new AcctSeed__Account_Payable_Line__c();
         line.AcctSeed__ExtId__c = b.id + ':L' + ordinal;
+        line.AcctSeed__Date__c = billDate;
         line.AcctSeed__Description__c = String.isNotBlank(memo) ? memo : b.memo;
         line.AcctSeed__Amount__c = amount;
 
@@ -261,15 +270,20 @@ public with sharing class RampBillBuilder {
                 + ' (line ' + ordinal + '). Code the bill in Ramp or set the "Ramp Suspense" default GL Account.');
         }
 
-        applyVariables(line, lineSelections, varByUuid);
-        applyVariables(line, b.accounting_field_selections, varByUuid);
+        applyVariables(line, lineSelections, varByUuid, inactiveVarUuids);
+        applyVariables(line, b.accounting_field_selections, varByUuid, inactiveVarUuids);
         return line;
     }
 
     private static void applyVariables(AcctSeed__Account_Payable_Line__c line,
-            List<BillFieldSelection> selections, Map<String, AcctSeed__Accounting_Variable__c> varByUuid) {
+            List<BillFieldSelection> selections, Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+            Set<String> inactiveVarUuids) {
         if (selections == null) return;
         for (BillFieldSelection sel : selections) {
+            if (inactiveVarUuids.contains(sel.id)) {
+                throw new BuildException('GL Variable option (Ramp id=' + sel.id
+                    + ') is no longer active in Accounting Seed. Reactivate or recode the bill before syncing.');
+            }
             if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
             String t = varByUuid.get(sel.id).AcctSeed__Type__c;
             if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = varByUuid.get(sel.id).Id;
@@ -323,6 +337,20 @@ public with sharing class RampBillBuilder {
             result.put(v.Ramp_Field_Option_Id__c, v);
         }
         return result;
+    }
+
+    private static Set<String> findInactiveVarUuids(Set<String> requested, Set<String> activeUuids) {
+        if (requested.isEmpty()) return new Set<String>();
+        Set<String> known = new Set<String>();
+        for (AcctSeed__Accounting_Variable__c v : [
+            SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c
+            WHERE Ramp_Field_Option_Id__c IN :requested
+        ]) {
+            known.add(v.Ramp_Field_Option_Id__c);
+        }
+        Set<String> inactive = new Set<String>(known);
+        inactive.removeAll(activeUuids);
+        return inactive;
     }
 
     private static Map<Date, Id> resolvePeriods(List<Bill> bills) {

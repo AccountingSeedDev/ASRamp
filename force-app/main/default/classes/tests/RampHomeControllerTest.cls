@@ -184,6 +184,27 @@ private class RampHomeControllerTest {
     }
 
     @IsTest
+    static void getHomeData_billAjrFailures_surfacedInErrorQueue() {
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_BILL_SYNC,
+                AcctSeed__Processed__c = 1, AcctSeed__Succeeded__c = 0, AcctSeed__Failed__c = 1,
+                AcctSeed__Notes__c = 'ramp-bill-err-1: Could not resolve an Expense GL Account for bill ramp-bill-err-1'
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            Boolean foundBillFailure = false;
+            for (RampHomeController.Failure f : d.failures) {
+                if ('bill'.equals(f.pipe)) { foundBillFailure = true; break; }
+            }
+            System.assert(foundBillFailure, 'AJR-based bill failure should surface in error queue');
+        }
+    }
+
+    @IsTest
     static void getHomeData_masterStepRemainsCompleteAfterAddingNewGLAccount() {
         System.runAs(TestDataFactory.getInstance().getAdminUser()) {
             // Mark one GL Account as synced — simulates initial setup complete.

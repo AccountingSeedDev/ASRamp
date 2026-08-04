@@ -54,7 +54,7 @@ public class RampBillSyncQueueable implements Queueable, Database.AllowsCallouts
         Integer pageSucceeded = result.payablesCreated + result.payablesUpdated;
         Integer p = cumProcessed + result.billsFetched;
         Integer s = cumSucceeded + pageSucceeded;
-        Integer f = cumFailed + Math.max(0, result.billsFetched - pageSucceeded);
+        Integer f = cumFailed + result.failedCount;
         String notes = cumNotes;
         if (!result.errorMessages.isEmpty()) {
             notes = RampJobResultLogger.appendNote(notes, String.join(result.errorMessages, '\n'));
