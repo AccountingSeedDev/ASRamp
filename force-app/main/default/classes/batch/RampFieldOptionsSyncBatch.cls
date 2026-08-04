@@ -219,12 +219,13 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
      */
     private Map<String, String> fetchRampIds(String rampFieldId, Set<String> sfIds) {
         Map<String, String> sfIdToRampId = new Map<String, String>();
-        String nextPage = null;
+        String nextCursor = null;
+        Integer pageCount = 0;
 
         do {
             String endpoint = '/developer/v1/accounting/field-options?field_id=' + rampFieldId;
-            if (nextPage != null) {
-                endpoint += '&start=' + nextPage;
+            if (nextCursor != null) {
+                endpoint += '&start=' + EncodingUtil.urlEncode(nextCursor, 'UTF-8');
             }
 
             HttpResponse res = RampAPIService.get(endpoint);
@@ -244,19 +245,28 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                     }
                 }
 
-                if (response.containsKey('page')) {
-                    Map<String, Object> page = (Map<String, Object>) response.get('page');
-                    nextPage = (String) page.get('next');
-                } else {
-                    nextPage = null;
-                }
+                nextCursor = extractNextCursor(response);
+                pageCount++;
             } else {
                 throw new RampAccountingFieldService.RampAccountingFieldException(
                     'GET field-options failed. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
                 );
             }
-        } while (nextPage != null);
+        } while (nextCursor != null && sfIdToRampId.size() < sfIds.size() && pageCount < 50);
 
         return sfIdToRampId;
+    }
+
+    private static String extractNextCursor(Map<String, Object> responseMap) {
+        Object pageObj = responseMap.get('page');
+        if (!(pageObj instanceof Map<String, Object>)) return null;
+        String nextUrl = (String) ((Map<String, Object>) pageObj).get('next');
+        if (String.isBlank(nextUrl)) return null;
+        Integer i = nextUrl.indexOf('start=');
+        if (i < 0) return null;
+        String cursor = nextUrl.substring(i + 6);
+        Integer amp = cursor.indexOf('&');
+        if (amp >= 0) cursor = cursor.substring(0, amp);
+        return cursor;
     }
 }

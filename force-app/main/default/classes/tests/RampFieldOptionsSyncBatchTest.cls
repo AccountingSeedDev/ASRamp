@@ -254,6 +254,73 @@ private class RampFieldOptionsSyncBatchTest {
     }
 
     @IsTest
+    static void testFetchRampIds_PaginatedGetStampsAllRecords() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            delete [
+                SELECT Id FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Field_Option_Id__c = null
+            ];
+
+            insert new List<AcctSeed__Accounting_Variable__c>{
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Page1 Var',
+                    AcctSeed__Type__c = 'GL Account Variable 3',
+                    AcctSeed__Active__c = true
+                ),
+                new AcctSeed__Accounting_Variable__c(
+                    Name = 'Page2 Var',
+                    AcctSeed__Type__c = 'GL Account Variable 3',
+                    AcctSeed__Active__c = true
+                )
+            };
+
+            List<AcctSeed__Accounting_Variable__c> inserted = [
+                SELECT Id, Name FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Type__c = 'GL Account Variable 3'
+                  AND AcctSeed__Active__c = true
+                ORDER BY Name
+            ];
+            String page1SfId = inserted[0].Id; // 'Page1 Var'
+            String page2SfId = inserted[1].Id; // 'Page2 Var'
+
+            Map<String, String> fieldNameToRampId = new Map<String, String>{
+                'GL Account Variable 3' => 'ramp-field-id-3'
+            };
+
+            Test.setMock(HttpCalloutMock.class, new RampFieldOptionsMockPaginated(page1SfId, page2SfId));
+
+            Test.startTest();
+            RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(TEST_CONNECTION_ID, fieldNameToRampId);
+            Id jobId = Database.executeBatch(batch, 200);
+            Test.stopTest();
+
+            AsyncApexJob job = [SELECT Status FROM AsyncApexJob WHERE Id = :jobId];
+            System.assertEquals('Completed', job.Status, 'Batch should complete successfully');
+
+            List<AcctSeed__Accounting_Variable__c> gl3Records = [
+                SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c
+                WHERE AcctSeed__Type__c = 'GL Account Variable 3'
+                  AND AcctSeed__Active__c = true
+            ];
+            for (AcctSeed__Accounting_Variable__c v : gl3Records) {
+                System.assertNotEquals(null, v.Ramp_Field_Option_Id__c,
+                    'All GL Var 3 records must be stamped when Ramp IDs span two GET pages');
+            }
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT AcctSeed__Failed__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'Finish should log exactly one AJR');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'No failures expected when pagination is handled correctly');
+        }
+    }
+
+    @IsTest
     static void testBatchExecution_UpdateSuccess() {
         // "Location A" was inserted in @TestSetup with Ramp_Field_Option_Id__c = 'existing-ramp-id-123'
         // and type 'GL Account Variable 2', so it will land in the PATCH (update) path.
@@ -403,6 +470,44 @@ private class RampFieldOptionsSyncBatchTest {
                 };
                 res.setStatusCode(200);
                 res.setBody(JSON.serialize(body));
+            }
+
+            return res;
+        }
+    }
+
+    private class RampFieldOptionsMockPaginated implements HttpCalloutMock {
+        private String page1SfId;
+        private String page2SfId;
+
+        public RampFieldOptionsMockPaginated(String page1SfId, String page2SfId) {
+            this.page1SfId = page1SfId;
+            this.page2SfId = page2SfId;
+        }
+
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            String endpoint = req.getEndpoint();
+            String method = req.getMethod();
+
+            if (endpoint.contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write accounting:read"}');
+            } else if (method == 'POST') {
+                res.setStatusCode(201);
+                res.setBody('{}');
+            } else if (method == 'GET' && endpoint.contains('field-options')) {
+                Boolean isPage2 = req.getEndpoint().contains('start=');
+                String sfId = isPage2 ? page2SfId : page1SfId;
+                String nextUrl = isPage2 ? null : 'https://api.ramp.com/developer/v1/accounting/field-options?field_id=ramp-field-id-3&start=page2cursor';
+                String nextValue = nextUrl == null ? 'null' : '"' + nextUrl + '"';
+                res.setStatusCode(200);
+                res.setBody('{"data": [{"ramp_id": "ramp-opt-' + sfId + '", "code": "' + sfId + '"}], "page": {"next": ' + nextValue + '}}');
+            } else {
+                res.setStatusCode(200);
+                res.setBody('{}');
             }
 
             return res;
