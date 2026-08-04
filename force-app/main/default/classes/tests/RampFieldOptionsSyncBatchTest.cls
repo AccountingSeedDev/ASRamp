@@ -9,6 +9,14 @@ private class RampFieldOptionsSyncBatchTest {
 
     private static final String TEST_CONNECTION_ID = 'test-connection-12345678-1234-1234-1234-123456789012';
 
+    // Keyset cursor for page 2 of the paginated field-options mock, and the complete
+    // page.next URL Ramp wraps it in. Declared here because Apex inner classes cannot
+    // hold static members.
+    private static final String PAGE_2_CURSOR = 'page2cursor';
+    private static final String PAGE_2_URL =
+        'https://api.ramp.com/developer/v1/accounting/field-options' +
+        '?field_id=ramp-field-id-3&start=' + PAGE_2_CURSOR;
+
     @TestSetup
     static void setup() {
         TestDataFactory.getInstance().initialize();
@@ -476,6 +484,16 @@ private class RampFieldOptionsSyncBatchTest {
         }
     }
 
+    /**
+     * Two-page field-options GET. Page 1 returns page1SfId and a `page.next` holding the
+     * COMPLETE next-page URL (as Ramp really does); page 2 returns page2SfId and a null
+     * `next`.
+     *
+     * The mock validates the `start` value the way Ramp does: only the bare cursor token
+     * is accepted, and anything else — notably the whole page.next URL — gets the real
+     * DEVELOPER_7001 "Not a valid UUID" 400. Without that check the test passes against
+     * the pre-fix code, because a verbatim page.next URL still contains "start=".
+     */
     private class RampFieldOptionsMockPaginated implements HttpCalloutMock {
         private String page1SfId;
         private String page2SfId;
@@ -499,10 +517,20 @@ private class RampFieldOptionsSyncBatchTest {
                 res.setStatusCode(201);
                 res.setBody('{}');
             } else if (method == 'GET' && endpoint.contains('field-options')) {
-                Boolean isPage2 = req.getEndpoint().contains('start=');
+                String startValue = endpoint.contains('start=')
+                    ? endpoint.substringAfter('start=').substringBefore('&')
+                    : null;
+
+                if (startValue != null && startValue != PAGE_2_CURSOR) {
+                    // Exactly what Ramp returns when `start` isn't a bare cursor token.
+                    res.setStatusCode(400);
+                    res.setBody('{"error":{"code":"DEVELOPER_7001","message":"Not a valid UUID: ' + startValue + '"}}');
+                    return res;
+                }
+
+                Boolean isPage2 = (startValue == PAGE_2_CURSOR);
                 String sfId = isPage2 ? page2SfId : page1SfId;
-                String nextUrl = isPage2 ? null : 'https://api.ramp.com/developer/v1/accounting/field-options?field_id=ramp-field-id-3&start=page2cursor';
-                String nextValue = nextUrl == null ? 'null' : '"' + nextUrl + '"';
+                String nextValue = isPage2 ? 'null' : '"' + PAGE_2_URL + '"';
                 res.setStatusCode(200);
                 res.setBody('{"data": [{"ramp_id": "ramp-opt-' + sfId + '", "code": "' + sfId + '"}], "page": {"next": ' + nextValue + '}}');
             } else {
