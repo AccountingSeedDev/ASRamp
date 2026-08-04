@@ -144,6 +144,10 @@ public with sharing class RampHomeController {
                 d.syncedRecent += j.succeeded;
             }
 
+            AcctSeed__Automated_Job_Results__c glAjr = ajr.get(RampJobResultLogger.JOB_GL_SYNC);
+            Boolean hasEverSyncedGl = glAjr != null && (Integer) nzDec(glAjr.AcctSeed__Succeeded__c) > 0;
+            Boolean masterDone = glSynced > 0 || hasEverSyncedGl;
+
             // Live follow-up + pending across all pipelines.
             d.failedTotal = nz(tx.get('failed')) + nz(bill.get('failed')) + nz(reimb.get('failed'));
             d.pendingTotal = nz(tx.get('pending')) + nz(bill.get('pending')) + nz(reimb.get('pending'));
@@ -152,7 +156,7 @@ public with sharing class RampHomeController {
             Boolean settingsSet = false;
             for (Setting s : d.settings) { if (s.label == 'Default ledger') settingsSet = s.isSet; }
 
-            d.steps = buildSteps(d.connected, d.accountingConfigured, glSynced, settingsSet, nz(tx.get('total')));
+            d.steps = buildSteps(d.connected, d.accountingConfigured, masterDone, settingsSet, nz(tx.get('total')));
             Integer doneCount = 0;
             for (Step s : d.steps) { if (s.done) doneCount++; }
             d.donePct = d.steps.isEmpty() ? 0 : (Integer) Math.round(100.0 * doneCount / d.steps.size());
@@ -491,11 +495,11 @@ public with sharing class RampHomeController {
 
     // ───────────────────────── steps ─────────────────────────
     private static List<Step> buildSteps(Boolean connected, Boolean acctConfigured,
-            Integer glSynced, Boolean settingsSet, Integer txTotal) {
+            Boolean masterDone, Boolean settingsSet, Integer txTotal) {
         List<Step> steps = new List<Step>();
         steps.add(step('connect',  'Connect to Ramp',           'Authorize with your Ramp OAuth client ID and secret.', connected));
         steps.add(step('acctconn', 'Establish accounting link', 'Open the accounting connection so Ramp can exchange data.', acctConfigured));
-        steps.add(step('master',   'Map master data',           'Sync GL accounts and accounting variables to Ramp.', glSynced > 0));
+        steps.add(step('master',   'Map master data',           'Sync GL accounts and accounting variables to Ramp.', masterDone));
         steps.add(step('settings', 'Configure sync settings',   'Set the clearing GL, ledger and JE status.', settingsSet));
         steps.add(step('firstrun', 'Run your first sync',        'Pull ready records from Ramp into Accounting Seed.', txTotal > 0));
         Boolean markedCurrent = false;

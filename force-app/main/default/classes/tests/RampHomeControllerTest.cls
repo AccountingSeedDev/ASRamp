@@ -203,4 +203,29 @@ private class RampHomeControllerTest {
             System.assert(masterDone, 'Master step must stay done once any GL account is synced, even if new unsynced records exist');
         }
     }
+
+    @IsTest
+    static void getHomeData_masterStepRemainsCompleteViaAjrWhenNoGLAccountsHaveRampId() {
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            // No GL accounts have Ramp_Id__c set (glSynced == 0), but an AJR record
+            // shows the GL sync has previously run and succeeded.  This simulates the
+            // scenario where old synced GL accounts are deactivated and new ones are
+            // created — the banner must NOT reappear.
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_GL_SYNC,
+                AcctSeed__Processed__c = 5, AcctSeed__Succeeded__c = 5, AcctSeed__Failed__c = 0
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            Boolean masterDone = false;
+            for (RampHomeController.Step s : d.steps) {
+                if (s.id == 'master') { masterDone = 'done'.equals(s.state); }
+            }
+            System.assert(masterDone,
+                'Master step must stay done when AJR confirms a prior successful GL sync, even if no active GL accounts currently have Ramp_Id__c set');
+        }
+    }
 }
