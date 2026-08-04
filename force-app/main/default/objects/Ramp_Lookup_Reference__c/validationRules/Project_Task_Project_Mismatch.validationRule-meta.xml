@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ValidationRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Project_Task_Project_Mismatch</fullName>
+    <active>true</active>
+    <description>Ensures the selected Project Task belongs to the chosen Project.</description>
+    <errorConditionFormula>AND(NOT(ISBLANK(Project_Task__c)), NOT(ISBLANK(Project__c)), Project_Task__r.AcctSeed__Project__c &lt;&gt; Project__c)</errorConditionFormula>
+    <errorDisplayField>Project_Task__c</errorDisplayField>
+    <errorMessage>The selected Project Task does not belong to the chosen Project.</errorMessage>
+</ValidationRule>

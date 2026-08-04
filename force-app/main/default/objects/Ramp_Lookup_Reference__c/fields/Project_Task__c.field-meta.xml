@@ -18,6 +18,6 @@
             <valueField>$Source.Project__c</valueField>
         </filterItems>
         <infoMessage>Only Project Tasks belonging to the selected Project are shown.</infoMessage>
-        <isOptional>true</isOptional>
+        <isOptional>false</isOptional>
     </lookupFilter>
 </CustomField>
