@@ -198,11 +198,9 @@ private class RampBillBuilderTest {
 
         RampBillBuilder.Bill b = sampleBill('bill-inactvar', 5000, null, vId);
         // Add a line-level variable selection referencing the now-inactive variable
-        RampBillBuilder.BillFieldSelection varSel = new RampBillBuilder.BillFieldSelection();
-        varSel.id = 'var-deleted-1';
-        varSel.category_info = new RampBillBuilder.BillField();
-        varSel.category_info.type = 'PROJECT';
-        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{ varSel };
+        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{
+            varSelection('var-deleted-1', av.Id, 'Deleted Var')
+        };
 
         Test.startTest();
         RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
@@ -210,8 +208,81 @@ private class RampBillBuilderTest {
 
         System.assertEquals(0, r.successful.size(), 'Bill with inactive GL variable should fail');
         System.assertEquals(1, r.failed.size(), 'Failed map should have one entry');
-        System.assert(r.failed.get('bill-inactvar').contains('no longer active'),
-            'Error message should mention inactive: ' + r.failed.get('bill-inactvar'));
+        System.assert(r.failed.get('bill-inactvar').contains('no longer available'),
+            'Error message should mention unavailability: ' + r.failed.get('bill-inactvar'));
+    }
+
+    @IsTest
+    static void build_deletedGLVariable_failsBill() {
+        configure();
+        Id vId = vendorAccount('DeletedVar Vendor');
+
+        // Deleting the variable in Accounting Seed never reaches Ramp, so the option
+        // stays selectable there. Reproduce that: the bill still codes to the option,
+        // but the Accounting Seed record behind external_id is gone.
+        AcctSeed__Accounting_Variable__c av = new AcctSeed__Accounting_Variable__c(
+            Name = 'Doomed Var',
+            AcctSeed__Type__c = 'GL Account Variable 1',
+            AcctSeed__Active__c = true,
+            Ramp_Field_Option_Id__c = 'var-gone-1'
+        );
+        insert av;
+        Id goneId = av.Id;
+        delete av;
+
+        RampBillBuilder.Bill b = sampleBill('bill-delvar', 5000, null, vId);
+        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{
+            varSelection('var-gone-1', goneId, 'Doomed Var')
+        };
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(0, r.successful.size(), 'Bill with deleted GL variable should fail');
+        System.assert(r.failed.get('bill-delvar').contains('no longer available'),
+            'Error message should mention unavailability: ' + r.failed.get('bill-delvar'));
+    }
+
+    @IsTest
+    static void build_merchantSelection_doesNotFailBill() {
+        configure();
+        Id vId = vendorAccount('Merchant Sel Vendor');
+
+        // Merchant selections also carry an external_id (an Account Id) and are routed
+        // into the variable bucket, so they must not be mistaken for a deleted variable.
+        RampBillBuilder.Bill b = sampleBill('bill-merchant', 5000, null, vId);
+        RampBillBuilder.BillFieldSelection merchantSel = new RampBillBuilder.BillFieldSelection();
+        merchantSel.id = 'ramp-merchant-1';
+        merchantSel.name = 'AdRoll';
+        merchantSel.external_id = vId;               // Account Id, not an Accounting Variable
+        merchantSel.category_info = new RampBillBuilder.BillField();
+        merchantSel.category_info.type = 'MERCHANT';
+        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{ merchantSel };
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(),
+            'Merchant selection must not be treated as a deleted GL Variable: ' + r.failed);
+    }
+
+    /**
+     * A GL Account Variable selection as Ramp actually returns it: id is the Ramp
+     * option uuid, external_id is the Accounting Seed record Id, and category_info.type
+     * is OTHER (the four GL Account Variable fields are Ramp custom fields).
+     */
+    private static RampBillBuilder.BillFieldSelection varSelection(String rampOptionId, Id variableId, String name) {
+        RampBillBuilder.BillFieldSelection sel = new RampBillBuilder.BillFieldSelection();
+        sel.id = rampOptionId;
+        sel.name = name;
+        sel.external_id = variableId;
+        sel.external_code = variableId;
+        sel.category_info = new RampBillBuilder.BillField();
+        sel.category_info.type = 'OTHER';
+        sel.category_info.name = 'GL Account Variable 1';
+        return sel;
     }
 
     @IsTest

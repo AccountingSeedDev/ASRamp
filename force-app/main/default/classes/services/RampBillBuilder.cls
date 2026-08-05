@@ -20,6 +20,12 @@ public with sharing class RampBillBuilder {
     // single-currency org throws SObjectException and would fail the whole run.
     private static final Boolean MULTI_CURRENCY = UserInfo.isMultiCurrencyOrganization();
 
+    // Ramp field options carry the Accounting Seed record Id in external_id (verified
+    // against live Ramp payloads). Merchant selections populate external_id too, with
+    // the Account prefix, so a dangling variable is only identifiable by key prefix.
+    private static final String VARIABLE_KEY_PREFIX =
+        AcctSeed__Accounting_Variable__c.SObjectType.getDescribe().getKeyPrefix();
+
     // --------------------------------------------------------------------
     //  DTOs — match GET /developer/v1/bills (Bill resource)
     // --------------------------------------------------------------------
@@ -129,7 +135,8 @@ public with sharing class RampBillBuilder {
         }
         Map<String, Id> glByUuid = resolveGLs(glUuids);
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid = resolveVariables(varUuids);
-        Set<String> inactiveVarUuids = findInactiveVarUuids(varUuids, varByUuid.keySet());
+        Set<String> unusableVarUuids = findInactiveVarUuids(varUuids, varByUuid.keySet());
+        unusableVarUuids.addAll(findDeletedVarUuids(bills, varByUuid.keySet()));
 
         // 2. Resolve vendors (auto-create) → native vendor id -> Account Id.
         List<BillVendor> vendors = new List<BillVendor>();
@@ -145,7 +152,7 @@ public with sharing class RampBillBuilder {
         // 4. Per-bill build.
         for (Bill b : bills) {
             try {
-                result.successful.add(buildOne(b, vendorByNativeId, glByUuid, varByUuid, inactiveVarUuids, periodByDate, ledgerId, suspenseGLId, bankGLId));
+                result.successful.add(buildOne(b, vendorByNativeId, glByUuid, varByUuid, unusableVarUuids, periodByDate, ledgerId, suspenseGLId, bankGLId));
             } catch (BuildException e) {
                 result.failed.put(b.id, e.getMessage());
             }
@@ -155,7 +162,7 @@ public with sharing class RampBillBuilder {
 
     private static PayableBuild buildOne(
         Bill b, Map<String, Id> vendorByNativeId, Map<String, Id> glByUuid,
-        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Set<String> inactiveVarUuids,
+        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Set<String> unusableVarUuids,
         Map<Date, Id> periodByDate, Id ledgerId, Id suspenseGLId, Id bankGLId
     ) {
         if (String.isBlank(b.id)) throw new BuildException('Bill missing id');
@@ -196,12 +203,12 @@ public with sharing class RampBillBuilder {
                 BillLineItem li = b.line_items[i];
                 Decimal amt = (li.amount != null) ? li.amount.toDecimal() : null;
                 if (amt == null) throw new BuildException('Line item ' + i + ' has no amount');
-                pb.lines.add(buildLine(b, li.accounting_field_selections, amt, li.memo, i, billDate, glByUuid, varByUuid, inactiveVarUuids, suspenseGLId));
+                pb.lines.add(buildLine(b, li.accounting_field_selections, amt, li.memo, i, billDate, glByUuid, varByUuid, unusableVarUuids, suspenseGLId));
             }
         } else {
             Decimal amt = (b.amount != null) ? b.amount.toDecimal() : null;
             if (amt == null) throw new BuildException('Bill has no amount and no line items');
-            pb.lines.add(buildLine(b, b.accounting_field_selections, amt, b.memo, 0, billDate, glByUuid, varByUuid, inactiveVarUuids, suspenseGLId));
+            pb.lines.add(buildLine(b, b.accounting_field_selections, amt, b.memo, 0, billDate, glByUuid, varByUuid, unusableVarUuids, suspenseGLId));
         }
 
         // ---- Payment stage: paid bill → Cash Disbursement + AP Disbursement ----
@@ -254,7 +261,7 @@ public with sharing class RampBillBuilder {
     private static AcctSeed__Account_Payable_Line__c buildLine(
         Bill b, List<BillFieldSelection> lineSelections, Decimal amount, String memo, Integer ordinal,
         Date billDate, Map<String, Id> glByUuid, Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
-        Set<String> inactiveVarUuids, Id suspenseGLId
+        Set<String> unusableVarUuids, Id suspenseGLId
     ) {
         AcctSeed__Account_Payable_Line__c line = new AcctSeed__Account_Payable_Line__c();
         line.AcctSeed__ExtId__c = b.id + ':L' + ordinal;
@@ -274,19 +281,20 @@ public with sharing class RampBillBuilder {
                 + ' (line ' + ordinal + '). Code the bill in Ramp or set the "Ramp Suspense" default GL Account.');
         }
 
-        applyVariables(line, lineSelections, varByUuid, inactiveVarUuids);
-        applyVariables(line, b.accounting_field_selections, varByUuid, inactiveVarUuids);
+        applyVariables(line, lineSelections, varByUuid, unusableVarUuids);
+        applyVariables(line, b.accounting_field_selections, varByUuid, unusableVarUuids);
         return line;
     }
 
     private static void applyVariables(AcctSeed__Account_Payable_Line__c line,
             List<BillFieldSelection> selections, Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
-            Set<String> inactiveVarUuids) {
+            Set<String> unusableVarUuids) {
         if (selections == null) return;
         for (BillFieldSelection sel : selections) {
-            if (inactiveVarUuids.contains(sel.id)) {
-                throw new BuildException('GL Variable option (Ramp id=' + sel.id
-                    + ') is no longer active in Accounting Seed. Reactivate or recode the bill before syncing.');
+            if (unusableVarUuids.contains(sel.id)) {
+                throw new BuildException('GL Variable "' + sel.name + '" (Ramp id=' + sel.id
+                    + ') is no longer available in Accounting Seed — it was deleted or deactivated.'
+                    + ' Restore it in Accounting Seed, or recode the bill in Ramp, before syncing.');
             }
             if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
             String t = varByUuid.get(sel.id).AcctSeed__Type__c;
@@ -355,6 +363,56 @@ public with sharing class RampBillBuilder {
         Set<String> inactive = new Set<String>(known);
         inactive.removeAll(activeUuids);
         return inactive;
+    }
+
+    /**
+     * Ramp option ids whose Accounting Seed variable has been deleted. Deleting the
+     * variable never reaches Ramp — only deactivation is PATCHed across — so the option
+     * stays selectable and bills keep coding to it. The option carries the Accounting
+     * Seed record Id in external_id; merchant selections carry an Account Id there too,
+     * so candidates are narrowed by the Accounting Variable key prefix.
+     */
+    private static Set<String> findDeletedVarUuids(List<Bill> bills, Set<String> activeUuids) {
+        Set<String> result = new Set<String>();
+        if (String.isBlank(VARIABLE_KEY_PREFIX)) return result;
+
+        Map<Id, String> uuidByVariableId = new Map<Id, String>();
+        for (Bill b : bills) {
+            List<BillFieldSelection> selections = new List<BillFieldSelection>();
+            if (b.accounting_field_selections != null) selections.addAll(b.accounting_field_selections);
+            if (b.line_items != null) {
+                for (BillLineItem li : b.line_items) {
+                    if (li.accounting_field_selections != null) selections.addAll(li.accounting_field_selections);
+                }
+            }
+            for (BillFieldSelection sel : selections) {
+                if (String.isBlank(sel.id) || activeUuids.contains(sel.id)) continue;
+                String t = (sel.category_info != null) ? sel.category_info.type : null;
+                if (t == 'GL_ACCOUNT') continue;
+                Id variableId = toVariableId(sel.external_id);
+                if (variableId != null) uuidByVariableId.put(variableId, sel.id);
+            }
+        }
+        if (uuidByVariableId.isEmpty()) return result;
+
+        Set<Id> stillExists = new Map<Id, AcctSeed__Accounting_Variable__c>([
+            SELECT Id FROM AcctSeed__Accounting_Variable__c WHERE Id IN :uuidByVariableId.keySet()
+        ]).keySet();
+        for (Id variableId : uuidByVariableId.keySet()) {
+            if (!stillExists.contains(variableId)) result.add(uuidByVariableId.get(variableId));
+        }
+        return result;
+    }
+
+    /** external_id as an Accounting Variable Id, or null when it points at anything else. */
+    private static Id toVariableId(String externalId) {
+        if (String.isBlank(externalId) || !externalId.startsWith(VARIABLE_KEY_PREFIX)) return null;
+        if (externalId.length() != 15 && externalId.length() != 18) return null;
+        try {
+            return Id.valueOf(externalId);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static Map<Date, Id> resolvePeriods(List<Bill> bills) {
