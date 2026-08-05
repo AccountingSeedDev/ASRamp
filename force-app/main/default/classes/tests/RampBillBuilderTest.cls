@@ -169,9 +169,15 @@ private class RampBillBuilderTest {
         Test.stopTest();
 
         System.assertEquals(1, r.successful.size(), 'Errors: ' + r.failed);
-        // Verify CurrencyIsoCode was set (dynamic field — inspect via JSON round-trip)
+        // CurrencyIsoCode only exists when Multi-Currency is enabled; in a
+        // single-currency org the build must still succeed without stamping it.
         String apJson = JSON.serialize(r.successful[0].header);
-        System.assert(apJson.contains('EUR'), 'CurrencyIsoCode EUR should be set on the payable: ' + apJson);
+        if (UserInfo.isMultiCurrencyOrganization()) {
+            System.assert(apJson.contains('EUR'), 'CurrencyIsoCode EUR should be set on the payable: ' + apJson);
+        } else {
+            System.assert(!apJson.contains('CurrencyIsoCode'),
+                'CurrencyIsoCode must not be set in a single-currency org: ' + apJson);
+        }
     }
 
     @IsTest

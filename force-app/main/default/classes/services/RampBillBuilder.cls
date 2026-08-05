@@ -16,6 +16,10 @@ public with sharing class RampBillBuilder {
     // safe, non-posted state.
     private static final String PAYABLE_STATUS = 'In Process';
 
+    // CurrencyIsoCode only exists when Multi-Currency is enabled; put()'ing it in a
+    // single-currency org throws SObjectException and would fail the whole run.
+    private static final Boolean MULTI_CURRENCY = UserInfo.isMultiCurrencyOrganization();
+
     // --------------------------------------------------------------------
     //  DTOs — match GET /developer/v1/bills (Bill resource)
     // --------------------------------------------------------------------
@@ -181,7 +185,7 @@ public with sharing class RampBillBuilder {
         ap.AcctSeed__Payee_Reference__c = b.invoice_number;
         ap.Ramp_Entity_Id__c = b.entity_id;
         ap.Ramp_Sync_Status__c = 'Pending';
-        if (b.amount != null && String.isNotBlank(b.amount.currency_code)) {
+        if (MULTI_CURRENCY && b.amount != null && String.isNotBlank(b.amount.currency_code)) {
             ap.put('CurrencyIsoCode', b.amount.currency_code);
         }
         pb.header = ap;
@@ -223,7 +227,7 @@ public with sharing class RampBillBuilder {
                 cd.AcctSeed__Status__c = 'In Process';
                 cd.AcctSeed__Type__c = mapPayType(b.payment != null ? b.payment.payment_method : null);
                 cd.Ramp_Sync_Status__c = 'Pending';
-                if (b.amount != null && String.isNotBlank(b.amount.currency_code)) {
+                if (MULTI_CURRENCY && b.amount != null && String.isNotBlank(b.amount.currency_code)) {
                     cd.put('CurrencyIsoCode', b.amount.currency_code);
                 }
                 pb.cashDisbursement = cd;
