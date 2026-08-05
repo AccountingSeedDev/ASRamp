@@ -49,8 +49,9 @@ public class RampBillSyncQueueable implements Queueable, Database.AllowsCallouts
             return;
         }
 
-        // Count at the bill (document) grain so processed = succeeded + failed.
-        // A bill "succeeds" when its payable syncs; payment-phase issues surface in Notes.
+        // Document grain: processed = bills fetched; succeeded = payables synced;
+        // failed = build/DML failures from either phase. A paid bill whose payable
+        // syncs but whose CD/APD fails counts in both, so s + f can exceed p.
         Integer pageSucceeded = result.payablesCreated + result.payablesUpdated;
         Integer p = cumProcessed + result.billsFetched;
         Integer s = cumSucceeded + pageSucceeded;
