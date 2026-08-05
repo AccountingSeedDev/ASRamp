@@ -229,8 +229,9 @@ private class RampAuthServiceTest {
     static void testGetAccessToken_TransactionCachePreventsDuplicateCallout() {
         // Arrange: inject credential so the callout path is exercised.
         RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
-        // Ensure no stale transaction token from a previous test.
-        RampAuthService.transactionToken = null;
+        // Start from a cold transaction token AND a cold Org Cache, so the assertion
+        // below holds regardless of what any other test method ran first.
+        RampAuthService.clearCachedToken();
 
         // The mock counts how many times it is called.
         RampAuthCallCountMock countMock = new RampAuthCallCountMock();
@@ -250,40 +251,39 @@ private class RampAuthServiceTest {
     }
 
     @IsTest
-    static void testClearTransactionToken_AllowsFreshFetch() {
-        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
-        // Evict any Org Cache entry that a prior test may have written for this credential,
-        // so the Org Cache is cold when we start.
+    static void testGetAccessToken_StaleTokenForOtherCredentialIsNotReused() {
+        Ramp_Credential__mdt credential = RampAuthService.buildTestCredential();
+        RampAuthService.overrideCredential = credential;
         RampAuthService.clearCachedToken();
-        // Pre-seed transactionToken with a stale value — simulates a credential that changed
-        // mid-transaction.  No Org Cache entry exists, so clearing the transaction token
-        // will force an HTTP callout on the next getAccessToken().
-        RampAuthService.transactionToken = 'stale_token_to_be_discarded';
+
+        // Seed a transaction token minted for a DIFFERENT Ramp business. The Org
+        // Cache is keyed on the client id precisely so a token can never cross
+        // credentials; the transaction cache must honour the same guarantee.
+        RampAuthService.transactionToken = 'token_for_another_ramp_business';
+        RampAuthService.transactionTokenKey = 'token_someOtherClientIdHash';
 
         RampAuthCallCountMock countMock = new RampAuthCallCountMock();
         Test.setMock(HttpCalloutMock.class, countMock);
 
         Test.startTest();
-        // transactionToken is already set — no callout needed here.
-        String beforeClear = RampAuthService.getAccessToken();
-        RampAuthService.clearTransactionToken();
-        // Org Cache is cold, so this must go all the way to HTTP.
-        String afterClear = RampAuthService.getAccessToken();
+        String token = RampAuthService.getAccessToken();
         Test.stopTest();
 
         System.assertEquals(1, countMock.callCount,
-            'Clearing the transaction token should force a new callout on the next getAccessToken()');
-        System.assertEquals('stale_token_to_be_discarded', beforeClear,
-            'Before clear: should return the pre-seeded transactionToken');
-        System.assertEquals('transaction_cached_token', afterClear,
-            'After clear: should return a freshly fetched token');
+            'A transaction token minted for a different credential must not be reused; ' +
+            'getAccessToken() should fetch a fresh one');
+        System.assertEquals('transaction_cached_token', token,
+            'Should return the freshly fetched token, not the other business\' token');
+        System.assertEquals(RampAuthService.cacheKeyFor(credential), RampAuthService.transactionTokenKey,
+            'transactionTokenKey should now match the active credential');
     }
 
     @IsTest
     static void testClearCachedToken_AlsoClearsTransactionToken() {
         RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
-        // Seed a non-blank transaction token directly via the @TestVisible field.
+        // Seed a non-blank transaction token directly via the @TestVisible fields.
         RampAuthService.transactionToken = 'seeded_token';
+        RampAuthService.transactionTokenKey = 'seeded_key';
 
         Test.startTest();
         RampAuthService.clearCachedToken();
@@ -291,18 +291,21 @@ private class RampAuthServiceTest {
 
         System.assertEquals(null, RampAuthService.transactionToken,
             'clearCachedToken() must also null out transactionToken');
+        System.assertEquals(null, RampAuthService.transactionTokenKey,
+            'clearCachedToken() must also null out transactionTokenKey, otherwise the ' +
+            'next getAccessToken() could match a key with no token behind it');
     }
 
     @IsTest
     static void testGetAccessToken_TransactionTokenPreemptsCacheCallout() {
-        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
-        // Pre-populate the transaction token to simulate a second batch-execute chunk.
+        Ramp_Credential__mdt credential = RampAuthService.buildTestCredential();
+        RampAuthService.overrideCredential = credential;
+        // Pre-populate the transaction token as an earlier call in the same
+        // transaction would have — a wasted OAuth callout here is exactly the
+        // FS-15027 "Too many callouts: 101" failure. CountMock proves zero occur.
         RampAuthService.transactionToken = 'preloaded_token';
+        RampAuthService.transactionTokenKey = RampAuthService.cacheKeyFor(credential);
 
-        // If getAccessToken() ignores transactionToken it would attempt a callout;
-        // Salesforce would throw "callout not allowed after DML" — but more
-        // importantly it would be a wasted callout. Using a CountMock ensures zero
-        // callouts are made.
         RampAuthCallCountMock countMock = new RampAuthCallCountMock();
         Test.setMock(HttpCalloutMock.class, countMock);
 

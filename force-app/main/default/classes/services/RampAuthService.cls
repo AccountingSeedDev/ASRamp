@@ -8,9 +8,16 @@ public with sharing class RampAuthService {
 
     // Within-transaction token cache: eliminates redundant Org Cache lookups and
     // HTTP callouts inside a single Apex transaction (e.g. a VendorSync batch
-    // execute chunk).  Cleared by clearCachedToken() and clearTransactionToken().
+    // execute chunk). Statics don't survive across batch chunks, so each chunk
+    // pays at most one token fetch. Cleared by clearCachedToken().
+    //
+    // Keyed on the same credential cache key as the Org Cache (see cacheKeyFor)
+    // so this fast path can never serve a token minted for a different Ramp
+    // business — a plain token field would silently bypass that guarantee.
     @TestVisible
     private static String transactionToken;
+    @TestVisible
+    private static String transactionTokenKey;
 
     // ── Test seam ──
     // The credential record carries the live client id/secret and is deployed
@@ -80,19 +87,23 @@ public with sharing class RampAuthService {
      * @return String The access token
      */
     public static String getAccessToken() {
-        // Fast path: reuse the token already fetched earlier in this transaction.
-        if (String.isNotBlank(transactionToken)) {
-            return transactionToken;
-        }
-
         Ramp_Credential__mdt credential = getActiveCredential();
         String cacheKey = cacheKeyFor(credential);
+
+        // Fast path: reuse the token already fetched earlier in this transaction
+        // for this same credential. Custom Metadata SOQL above is limit-free, and
+        // callers reaching here via RampAPIService.makeRequest have already
+        // resolved the credential, so this costs nothing on the hot path.
+        if (String.isNotBlank(transactionToken) && cacheKey == transactionTokenKey) {
+            return transactionToken;
+        }
 
         // Try to get from cache first
         Cache.OrgPartition orgPartition = Cache.Org.getPartition(CACHE_PARTITION);
         if (orgPartition != null) {
             String cachedToken = (String) orgPartition.get(cacheKey);
             if (String.isNotBlank(cachedToken)) {
+                transactionTokenKey = cacheKey;
                 transactionToken = cachedToken;
                 return transactionToken;
             }
@@ -106,21 +117,12 @@ public with sharing class RampAuthService {
             if (orgPartition != null) {
                 orgPartition.put(cacheKey, tokenResponse.access_token, CACHE_TTL_SECONDS);
             }
+            transactionTokenKey = cacheKey;
             transactionToken = tokenResponse.access_token;
             return transactionToken;
         }
 
         throw new RampAuthException('Failed to obtain valid access token');
-    }
-
-    /**
-     * @description Clears only the transaction-level token cache without touching
-     * the Org Cache. Useful when the Org Cache entry is still valid but a fresh
-     * Org Cache lookup is needed on the next getAccessToken() call (e.g. after
-     * a credential switch within the same transaction).
-     */
-    public static void clearTransactionToken() {
-        transactionToken = null;
     }
 
     /**
@@ -227,6 +229,7 @@ public with sharing class RampAuthService {
      */
     public static void clearCachedToken() {
         transactionToken = null;
+        transactionTokenKey = null;
 
         Ramp_Credential__mdt credential = getActiveCredential();
 
