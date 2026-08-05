@@ -127,6 +127,118 @@ private class RampBillBuilderTest {
     }
 
     @IsTest
+    static void build_payableLineDate_matchesBillDate() {
+        configure();
+        Id vId = vendorAccount('Date Vendor');
+        RampBillBuilder.Bill b = sampleBill('bill-date', 10000, null, vId);
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(), 'Errors: ' + r.failed);
+        RampBillBuilder.PayableBuild pb = r.successful[0];
+        System.assertEquals(pb.header.AcctSeed__Date__c, pb.lines[0].AcctSeed__Date__c,
+            'Payable line date must match the payable header date');
+    }
+
+    @IsTest
+    static void build_foreignCurrencyBill_setsCurrencyOnPayable() {
+        configure();
+        Id vId = vendorAccount('EUR Vendor');
+        RampBillBuilder.Bill b = new RampBillBuilder.Bill();
+        b.id = 'bill-eur';
+        b.invoice_number = 'INV-EUR';
+        Date d = openPeriodDate();
+        b.issued_at = String.valueOf(d) + 'T00:00:00+00:00';
+        b.due_at = b.issued_at;
+        b.status = 'OPEN';
+        b.sync_status = 'NOT_SYNCED';
+        b.entity_id = 'e-eur';
+        b.vendor = new RampBillBuilder.BillVendor();
+        b.vendor.id = 'nv-eur'; b.vendor.name = 'EUR Vendor'; b.vendor.remote_id = vId;
+        RampBillBuilder.CurrencyAmount amt = new RampBillBuilder.CurrencyAmount();
+        amt.amount = 70000; amt.currency_code = 'EUR'; amt.minor_unit_conversion_rate = 100;
+        b.amount = amt;
+        RampBillBuilder.BillLineItem li = new RampBillBuilder.BillLineItem();
+        li.amount = amt; li.memo = 'EUR line';
+        b.line_items = new List<RampBillBuilder.BillLineItem>{ li };
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(), 'Errors: ' + r.failed);
+        // CurrencyIsoCode only exists when Multi-Currency is enabled; in a
+        // single-currency org the build must still succeed without stamping it.
+        String apJson = JSON.serialize(r.successful[0].header);
+        if (UserInfo.isMultiCurrencyOrganization()) {
+            System.assert(apJson.contains('EUR'), 'CurrencyIsoCode EUR should be set on the payable: ' + apJson);
+        } else {
+            System.assert(!apJson.contains('CurrencyIsoCode'),
+                'CurrencyIsoCode must not be set in a single-currency org: ' + apJson);
+        }
+    }
+
+    @IsTest
+    static void build_inactiveGLVariable_failsBill() {
+        configure();
+        Id vId = vendorAccount('InactiveVar Vendor');
+
+        // Create an Accounting Variable that has a Ramp field option id set,
+        // then deactivate it so it won't appear in resolveVariables() but WILL
+        // be found by findInactiveVarUuids().
+        AcctSeed__Accounting_Variable__c av = new AcctSeed__Accounting_Variable__c(
+            Name = 'Deleted Var',
+            AcctSeed__Type__c = 'GL Account Variable 1',
+            AcctSeed__Active__c = false,
+            Ramp_Field_Option_Id__c = 'var-deleted-1'
+        );
+        insert av;
+
+        RampBillBuilder.Bill b = sampleBill('bill-inactvar', 5000, null, vId);
+        // Add a line-level variable selection referencing the now-inactive variable
+        RampBillBuilder.BillFieldSelection varSel = new RampBillBuilder.BillFieldSelection();
+        varSel.id = 'var-deleted-1';
+        varSel.category_info = new RampBillBuilder.BillField();
+        varSel.category_info.type = 'PROJECT';
+        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{ varSel };
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(0, r.successful.size(), 'Bill with inactive GL variable should fail');
+        System.assertEquals(1, r.failed.size(), 'Failed map should have one entry');
+        System.assert(r.failed.get('bill-inactvar').contains('no longer active'),
+            'Error message should mention inactive: ' + r.failed.get('bill-inactvar'));
+    }
+
+    @IsTest
+    static void build_checkPayment_createsCashDisbursementWithCheckType() {
+        configure();
+        Id vId = vendorAccount('Check Vendor');
+        RampBillBuilder.Bill b = sampleBill('bill-check', 10000, null, vId);
+        b.status = 'PAID';
+        b.paid_at = b.issued_at;
+        b.payment = new RampBillBuilder.BillPayment();
+        b.payment.payment_method = 'CHECK';
+        b.payment.payment_date = String.valueOf(openPeriodDate());
+        RampBillBuilder.CurrencyAmount pamt = new RampBillBuilder.CurrencyAmount();
+        pamt.amount = 10000; pamt.currency_code = 'USD'; pamt.minor_unit_conversion_rate = 100;
+        b.payment.amount = pamt;
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(), 'Errors: ' + r.failed);
+        System.assertNotEquals(null, r.successful[0].cashDisbursement);
+        System.assertEquals('Check', r.successful[0].cashDisbursement.AcctSeed__Type__c,
+            'Cash Disbursement type should be Check when payment_method is CHECK');
+    }
+
+    @IsTest
     static void build_paidBill_buildsCashDisbursementAndAPD() {
         configure();
         Id vId = vendorAccount('Paid Vendor');

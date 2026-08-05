@@ -654,6 +654,16 @@ public with sharing class RampHomeController {
                 reimbAjr.CreatedDate.date(), reimbNotes, true));
         }
 
+        AcctSeed__Automated_Job_Results__c billAjr = ajr.get(RampJobResultLogger.JOB_BILL_SYNC);
+        if (billAjr != null && (Integer) nzDec(billAjr.AcctSeed__Failed__c) > 0) {
+            String billNotes = String.isNotBlank(billAjr.AcctSeed__Notes__c)
+                ? billAjr.AcctSeed__Notes__c
+                : 'Bill sync failed (' + (Integer) nzDec(billAjr.AcctSeed__Failed__c) + ' error(s))';
+            rows.add(failure('transaction', billAjr.Id, 'Bill sync', null,
+                'Vendor Payable', 'bill', 'syncBill',
+                billAjr.CreatedDate.date(), billNotes, true));
+        }
+
         // ── Master group: no per-record error fields, so surface the latest run's
         // Automated Job Result when it reported failures (reason = AJR notes). ──
         rows.addAll(masterFailures(ajr));

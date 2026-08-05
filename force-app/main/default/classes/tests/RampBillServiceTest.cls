@@ -128,6 +128,49 @@ private class RampBillServiceTest {
         System.assertEquals(1, ajrs[0].AcctSeed__Succeeded__c);
     }
 
+    @IsTest
+    static void syncPage_paidBill_batchNameIsDescriptive() {
+        Id vId = configureForSync();
+        Test.setMock(HttpCalloutMock.class, new PaidBillMock(vId));
+
+        Test.startTest();
+        RampBillService.PageResult r = RampBillService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(0, r.failedCount, 'Errors: ' + r.errorMessages);
+        List<AcctSeed__Cash_Disbursement_Batch__c> batches = [
+            SELECT Name FROM AcctSeed__Cash_Disbursement_Batch__c
+            WHERE AcctSeed__ExtId__c LIKE 'RAMP-BILLPAY:%'
+        ];
+        System.assertEquals(1, batches.size(), 'One batch should be created');
+        System.assert(batches[0].Name.startsWith('Ramp Bill Payment '),
+            'Batch Name should start with "Ramp Bill Payment ": ' + batches[0].Name);
+    }
+
+    @IsTest
+    static void queueable_paymentPhaseFailed_countedInAJRFailed() {
+        Id vId = configureForSync();
+        // Remove bill payment bank GL so CD creation fails (no bank configured)
+        RampSyncSettingsService.overrideGLDefaults = new Map<String, Id>{
+            RampSyncSettingsService.SPEC_SUSPENSE => RampSyncSettingsService.overrideGLDefaults.get(RampSyncSettingsService.SPEC_SUSPENSE)
+        };
+        RampSyncSettingsService.resetCache();
+        Test.setMock(HttpCalloutMock.class, new PaidBillMock(vId));
+
+        Test.startTest();
+        System.enqueueJob(new RampBillSyncQueueable());
+        Test.stopTest();
+
+        List<AcctSeed__Automated_Job_Results__c> ajrs = [
+            SELECT AcctSeed__Processed__c, AcctSeed__Succeeded__c, AcctSeed__Failed__c
+            FROM AcctSeed__Automated_Job_Results__c
+            WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_BILL_SYNC
+        ];
+        System.assertEquals(1, ajrs.size());
+        System.assert((Integer) ajrs[0].AcctSeed__Failed__c >= 1,
+            'AJR Failed count should be >=1 when payment phase fails: ' + ajrs[0].AcctSeed__Failed__c);
+    }
+
     // --------------------------------------------------------------------
     //  Mocks
     // --------------------------------------------------------------------
