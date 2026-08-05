@@ -225,6 +225,100 @@ private class RampAuthServiceTest {
         System.assert(!invalidResponse.isValid(), 'Token without access_token should be invalid');
     }
 
+    @IsTest
+    static void testGetAccessToken_TransactionCachePreventsDuplicateCallout() {
+        // Arrange: inject credential so the callout path is exercised.
+        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
+        // Start from a cold transaction token AND a cold Org Cache, so the assertion
+        // below holds regardless of what any other test method ran first.
+        RampAuthService.clearCachedToken();
+
+        // The mock counts how many times it is called.
+        RampAuthCallCountMock countMock = new RampAuthCallCountMock();
+        Test.setMock(HttpCalloutMock.class, countMock);
+
+        Test.startTest();
+        String firstToken  = RampAuthService.getAccessToken();
+        String secondToken = RampAuthService.getAccessToken();
+        String thirdToken  = RampAuthService.getAccessToken();
+        Test.stopTest();
+
+        System.assertEquals(1, countMock.callCount,
+            'Only one HTTP callout should occur; subsequent calls must use transactionToken');
+        System.assertEquals(firstToken, secondToken, 'All calls must return the same token');
+        System.assertEquals(firstToken, thirdToken,  'All calls must return the same token');
+        System.assertEquals('transaction_cached_token', firstToken, 'Token value should match mock');
+    }
+
+    @IsTest
+    static void testGetAccessToken_StaleTokenForOtherCredentialIsNotReused() {
+        Ramp_Credential__mdt credential = RampAuthService.buildTestCredential();
+        RampAuthService.overrideCredential = credential;
+        RampAuthService.clearCachedToken();
+
+        // Seed a transaction token minted for a DIFFERENT Ramp business. The Org
+        // Cache is keyed on the client id precisely so a token can never cross
+        // credentials; the transaction cache must honour the same guarantee.
+        RampAuthService.transactionToken = 'token_for_another_ramp_business';
+        RampAuthService.transactionTokenKey = 'token_someOtherClientIdHash';
+
+        RampAuthCallCountMock countMock = new RampAuthCallCountMock();
+        Test.setMock(HttpCalloutMock.class, countMock);
+
+        Test.startTest();
+        String token = RampAuthService.getAccessToken();
+        Test.stopTest();
+
+        System.assertEquals(1, countMock.callCount,
+            'A transaction token minted for a different credential must not be reused; ' +
+            'getAccessToken() should fetch a fresh one');
+        System.assertEquals('transaction_cached_token', token,
+            'Should return the freshly fetched token, not the other business\' token');
+        System.assertEquals(RampAuthService.cacheKeyFor(credential), RampAuthService.transactionTokenKey,
+            'transactionTokenKey should now match the active credential');
+    }
+
+    @IsTest
+    static void testClearCachedToken_AlsoClearsTransactionToken() {
+        RampAuthService.overrideCredential = RampAuthService.buildTestCredential();
+        // Seed a non-blank transaction token directly via the @TestVisible fields.
+        RampAuthService.transactionToken = 'seeded_token';
+        RampAuthService.transactionTokenKey = 'seeded_key';
+
+        Test.startTest();
+        RampAuthService.clearCachedToken();
+        Test.stopTest();
+
+        System.assertEquals(null, RampAuthService.transactionToken,
+            'clearCachedToken() must also null out transactionToken');
+        System.assertEquals(null, RampAuthService.transactionTokenKey,
+            'clearCachedToken() must also null out transactionTokenKey, otherwise the ' +
+            'next getAccessToken() could match a key with no token behind it');
+    }
+
+    @IsTest
+    static void testGetAccessToken_TransactionTokenPreemptsCacheCallout() {
+        Ramp_Credential__mdt credential = RampAuthService.buildTestCredential();
+        RampAuthService.overrideCredential = credential;
+        // Pre-populate the transaction token as an earlier call in the same
+        // transaction would have — a wasted OAuth callout here is exactly the
+        // FS-15027 "Too many callouts: 101" failure. CountMock proves zero occur.
+        RampAuthService.transactionToken = 'preloaded_token';
+        RampAuthService.transactionTokenKey = RampAuthService.cacheKeyFor(credential);
+
+        RampAuthCallCountMock countMock = new RampAuthCallCountMock();
+        Test.setMock(HttpCalloutMock.class, countMock);
+
+        Test.startTest();
+        String token = RampAuthService.getAccessToken();
+        Test.stopTest();
+
+        System.assertEquals(0, countMock.callCount,
+            'No callout should occur when transactionToken is already set');
+        System.assertEquals('preloaded_token', token,
+            'Should return the cached transaction token');
+    }
+
     /**
      * @description Mock class for successful OAuth response
      */
@@ -295,6 +389,26 @@ private class RampAuthServiceTest {
             res.setStatusCode(502);
             res.setHeader('Content-Type', 'text/html');
             res.setBody('<!DOCTYPE html><html lang=en><title>| 502: Bad gateway</title><body>Bad gateway</body></html>');
+            return res;
+        }
+    }
+
+    /**
+     * @description Counts how many times it is invoked and always returns a valid
+     * token response.  Used to assert the number of HTTP callouts made during a test.
+     */
+    private class RampAuthCallCountMock implements HttpCalloutMock {
+        public Integer callCount = 0;
+        public HttpResponse respond(HttpRequest req) {
+            callCount++;
+            HttpResponse res = new HttpResponse();
+            res.setStatusCode(200);
+            res.setHeader('Content-Type', 'application/json');
+            res.setBody(JSON.serialize(new Map<String, Object>{
+                'access_token' => 'transaction_cached_token',
+                'token_type'   => 'Bearer',
+                'expires_in'   => 864000
+            }));
             return res;
         }
     }
