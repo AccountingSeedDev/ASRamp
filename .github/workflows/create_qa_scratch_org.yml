@@ -1,0 +1,315 @@
+name: Create QA Scratch Org (Packaged)
+
+# Creates a long-lived scratch org for QA testers that mirrors a customer
+# install: the Accounting Seed Financial Suite (1GP) dependency plus the
+# ASRamp managed package installed from a package version.
+#
+# The org itself is created with NO namespace (--no-namespace) so the
+# AcctSeedRamp namespace comes from the installed package, exactly as it
+# does in a customer org. A namespaced org could not install ASRamp at all
+# (namespace collision), which is why this differs from the dev workflow.
+#
+# Requires the following repo secrets:
+#   INT_USER_SFDX_AUTH_URL - SFDX auth URL for the Dev Hub
+#   SLACK_BOT_TOKEN_NEW    - (optional) Slack bot token for credential drop
+#   SLACK_CHANNEL_ID       - (optional) Slack channel to post credentials to
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: 'ASRamp version: "latest", an alias (ASRamp@0.9.0-1), or a 04t Id'
+        default: 'latest'
+        required: true
+      fs_version_id:
+        description: 'FS package version Id (blank = dependency in sfdx-project.json)'
+        default: ''
+        required: false
+      duration_days:
+        description: 'Scratch org lifetime in days (1-30)'
+        default: '30'
+        required: true
+      org_suffix:
+        description: 'Org alias suffix (blank = GitHub actor)'
+        default: ''
+        required: false
+      verification_email:
+        description: 'Admin email address (for login codes)'
+        default: ''
+        required: false
+
+env:
+  DEVHUB_SFDX_AUTH_URL: ${{ secrets.INT_USER_SFDX_AUTH_URL }}
+  SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+
+jobs:
+  create_qa_scratch_org:
+    name: Create QA Scratch Org
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # ── Step 1: Checkout ────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── Step 2: Install SF CLI and authenticate to the Dev Hub ──────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The SF CLI's HTTP stack (@jsforce/jsforce-node -> undici@8)
+          # requires Node >= 22.19.0.
+          node-version: "22"
+
+      - name: Install SF CLI and auth Dev Hub
+        run: |
+          set -euo pipefail
+          npm install --global @salesforce/cli
+          sf --version
+          if [ -z "${DEVHUB_SFDX_AUTH_URL:-}" ]; then
+            echo "ERROR: INT_USER_SFDX_AUTH_URL secret is not set; cannot create scratch org." >&2
+            exit 1
+          fi
+          printf '%s' "$DEVHUB_SFDX_AUTH_URL" > devhub_auth.txt
+          sf org login sfdx-url --sfdx-url-file devhub_auth.txt --set-default-dev-hub --alias devhub
+          rm -f devhub_auth.txt
+
+      # ── Step 3: Resolve the package versions to install ─────────────
+      # FS comes from the dependency alias in sfdx-project.json so the QA org
+      # always matches what the package is actually built against.
+      - name: Resolve package versions
+        id: versions
+        env:
+          PACKAGE_VERSION_INPUT: ${{ github.event.inputs.package_version }}
+          FS_VERSION_INPUT: ${{ github.event.inputs.fs_version_id }}
+        run: |
+          set -euo pipefail
+
+          # --- Financial Suite dependency ---
+          if [ -n "$FS_VERSION_INPUT" ]; then
+            FS_ID="$FS_VERSION_INPUT"
+            FS_LABEL="$FS_VERSION_INPUT (manual override)"
+          else
+            FS_ALIAS=$(jq -r '.packageDirectories[0].dependencies[0].package' sfdx-project.json)
+            FS_ID=$(jq -r --arg a "$FS_ALIAS" '.packageAliases[$a] // ""' sfdx-project.json)
+            FS_LABEL="$FS_ALIAS"
+            if [ -z "$FS_ID" ]; then
+              echo "ERROR: no packageAliases entry for dependency '$FS_ALIAS'." >&2
+              exit 1
+            fi
+          fi
+          echo "FS dependency: $FS_LABEL -> $FS_ID"
+
+          # --- ASRamp package version ---
+          case "$PACKAGE_VERSION_INPUT" in
+            04t*)
+              RAMP_ID="$PACKAGE_VERSION_INPUT"
+              RAMP_LABEL="$PACKAGE_VERSION_INPUT"
+              ;;
+            latest|LATEST|'')
+              # Newest version built on the Dev Hub (includes betas, which are
+              # installable in scratch orgs).
+              RAMP_ID=""
+              if sf package version list --packages ASRamp --target-dev-hub devhub --json > pkg_versions.json 2>/dev/null; then
+                RAMP_ID=$(jq -r '[.result[]?] | sort_by(.CreatedDate) | last | .SubscriberPackageVersionId // ""' pkg_versions.json)
+                RAMP_LABEL=$(jq -r '[.result[]?] | sort_by(.CreatedDate) | last | .Version // ""' pkg_versions.json)
+              fi
+              if [ -z "$RAMP_ID" ] || [ "$RAMP_ID" = "null" ]; then
+                echo "Dev Hub lookup returned nothing; falling back to the highest alias in sfdx-project.json."
+                RAMP_ALIAS=$(python3 - <<'PYEOF'
+          import json, re
+
+          with open("sfdx-project.json") as f:
+              aliases = json.load(f).get("packageAliases", {})
+
+          def key(alias):
+              m = re.match(r"^ASRamp@(\d+)\.(\d+)\.(\d+)-(\d+)$", alias)
+              return tuple(int(g) for g in m.groups()) if m else None
+
+          candidates = [(key(a), a) for a in aliases if key(a)]
+          print(max(candidates)[1] if candidates else "")
+          PYEOF
+          )
+                if [ -z "$RAMP_ALIAS" ]; then
+                  echo "ERROR: could not resolve a latest ASRamp version." >&2
+                  exit 1
+                fi
+                RAMP_ID=$(jq -r --arg a "$RAMP_ALIAS" '.packageAliases[$a]' sfdx-project.json)
+                RAMP_LABEL="$RAMP_ALIAS"
+              fi
+              ;;
+            *)
+              RAMP_ID=$(jq -r --arg a "$PACKAGE_VERSION_INPUT" '.packageAliases[$a] // ""' sfdx-project.json)
+              RAMP_LABEL="$PACKAGE_VERSION_INPUT"
+              if [ -z "$RAMP_ID" ]; then
+                echo "ERROR: no packageAliases entry for '$PACKAGE_VERSION_INPUT'." >&2
+                exit 1
+              fi
+              ;;
+          esac
+          echo "ASRamp version: $RAMP_LABEL -> $RAMP_ID"
+
+          echo "fs_id=$FS_ID" >> "$GITHUB_OUTPUT"
+          echo "fs_label=$FS_LABEL" >> "$GITHUB_OUTPUT"
+          echo "ramp_id=$RAMP_ID" >> "$GITHUB_OUTPUT"
+          echo "ramp_label=$RAMP_LABEL" >> "$GITHUB_OUTPUT"
+
+      # ── Step 4: Work out the org alias ──────────────────────────────
+      - name: Resolve org naming
+        id: naming
+        env:
+          ORG_SUFFIX: ${{ github.event.inputs.org_suffix }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          SUFFIX="${ORG_SUFFIX:-$GH_ACTOR}"
+          # Aliases allow letters, digits, underscore and hyphen only.
+          SUFFIX=$(printf '%s' "$SUFFIX" | tr -cd '[:alnum:]_-')
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "alias=asramp_qa_$SUFFIX" >> "$GITHUB_OUTPUT"
+
+      # ── Step 5: Scratch org definition tweaks ───────────────────────
+      - name: Apply scratch org definition overrides
+        env:
+          VERIFICATION_EMAIL: ${{ github.event.inputs.verification_email }}
+          ORG_NAME_SUFFIX: ${{ steps.naming.outputs.suffix }}
+        run: |
+          set -euo pipefail
+          python3 - "$ORG_NAME_SUFFIX" <<'PYEOF'
+          import json, os, sys
+
+          suffix = sys.argv[1]
+          path = "config/project-scratch-def.json"
+          with open(path) as f:
+              definition = json.load(f)
+
+          definition["orgName"] = f"ASRamp QA - {suffix}"
+          email = os.environ.get("VERIFICATION_EMAIL", "").strip()
+          if email:
+              definition["adminEmail"] = email
+
+          with open(path, "w") as f:
+              json.dump(definition, f, indent=2)
+          print(json.dumps(definition, indent=2))
+          PYEOF
+
+      # ── Step 6: Create the scratch org (no namespace) ───────────────
+      - name: Create scratch org
+        id: scratch-org
+        env:
+          ALIAS: ${{ steps.naming.outputs.alias }}
+          DURATION_DAYS: ${{ github.event.inputs.duration_days }}
+        run: |
+          set -euo pipefail
+          echo "alias=$ALIAS" >> "$GITHUB_OUTPUT"
+
+          # --no-namespace is deliberate: the AcctSeedRamp namespace must come
+          # from the installed managed package, not from the org.
+          sf org create scratch \
+            --definition-file config/project-scratch-def.json \
+            --alias "$ALIAS" \
+            --set-default \
+            --no-namespace \
+            --duration-days "$DURATION_DAYS" \
+            --wait 30 \
+            --target-dev-hub devhub
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      # ── Step 7: Install Financial Suite, then ASRamp ────────────────
+      - name: Install Accounting Seed Financial Suite
+        run: |
+          set -euo pipefail
+          sf package install \
+            --package "${{ steps.versions.outputs.fs_id }}" \
+            --target-org "${{ steps.scratch-org.outputs.alias }}" \
+            --security-type AdminsOnly \
+            --wait 60 \
+            --publish-wait 30 \
+            --no-prompt
+
+      - name: Install ASRamp package
+        run: |
+          set -euo pipefail
+          sf package install \
+            --package "${{ steps.versions.outputs.ramp_id }}" \
+            --target-org "${{ steps.scratch-org.outputs.alias }}" \
+            --security-type AdminsOnly \
+            --wait 60 \
+            --publish-wait 30 \
+            --no-prompt
+
+      # ── Step 8: Grant permission sets ───────────────────────────────
+      # Managed-package permission set API names may or may not need the
+      # namespace prefix depending on CLI version, so try both.
+      - name: Assign permission sets
+        continue-on-error: true
+        run: |
+          ALIAS="${{ steps.scratch-org.outputs.alias }}"
+          assign() {
+            for name in "$@"; do
+              if sf org assign permset --name "$name" --target-org "$ALIAS"; then
+                echo "Assigned $name"
+                return 0
+              fi
+            done
+            echo "WARNING: could not assign any of: $*"
+          }
+          assign AcctSeed__AS_Full_Admin AS_Full_Admin
+          assign AcctSeedRamp__Ramp_Admin Ramp_Admin
+
+      # ── Step 9: Generate a password and collect credentials ─────────
+      - name: Collect scratch org credentials
+        if: steps.scratch-org.outputs.created == 'true'
+        run: |
+          set -euo pipefail
+          ALIAS="${{ steps.scratch-org.outputs.alias }}"
+          sf org generate password --target-org "$ALIAS" || \
+            echo "WARNING: password generation failed (EnableSetPasswordInApi missing?)"
+          sf org display --target-org "$ALIAS" --json \
+            | jq '{instanceUrl: .result.instanceUrl, username: .result.username, password: .result.password, orgId: .result.id, expirationDate: .result.expirationDate}' \
+            > ScratchOrg.json
+          cat ScratchOrg.json
+
+      # ── Step 10: Job summary ────────────────────────────────────────
+      - name: Write job summary
+        if: steps.scratch-org.outputs.created == 'true'
+        run: |
+          {
+            echo "## QA Scratch Org Ready"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Alias | \`${{ steps.scratch-org.outputs.alias }}\` |"
+            echo "| Namespace on org | none (package supplies \`AcctSeedRamp\`) |"
+            echo "| Financial Suite | ${{ steps.versions.outputs.fs_label }} |"
+            echo "| ASRamp version | ${{ steps.versions.outputs.ramp_label }} |"
+            echo "| Login URL | $(jq -r '.instanceUrl' ScratchOrg.json) |"
+            echo "| Username | $(jq -r '.username' ScratchOrg.json) |"
+            echo "| Password | $(jq -r '.password // "n/a"' ScratchOrg.json) |"
+            echo "| Expires | $(jq -r '.expirationDate // "n/a"' ScratchOrg.json) |"
+            echo ""
+            echo "Ramp API credentials are **not** packaged (\`Ramp_Credential__mdt\` is gitignored)."
+            echo "Deploy or create the credential record in this org before testing Ramp callouts."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload credentials artifact
+        if: steps.scratch-org.outputs.created == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-scratch-org-${{ github.run_id }}
+          path: ScratchOrg.json
+          retention-days: 7
+
+      # ── Step 11: Post credentials to Slack (optional) ───────────────
+      - name: Upload credentials to Slack
+        if: steps.scratch-org.outputs.created == 'true' && env.SLACK_CHANNEL_ID != ''
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: files.uploadV2
+          token: ${{ secrets.SLACK_BOT_TOKEN_NEW }}
+          payload: |
+            channel_id: ${{ secrets.SLACK_CHANNEL_ID }}
+            initial_comment: "ASRamp QA Scratch Org (${{ steps.versions.outputs.ramp_label }}) for ${{ github.actor }}"
+            file: "${{ github.workspace }}/ScratchOrg.json"
+            filename: "ScratchOrg.json"
