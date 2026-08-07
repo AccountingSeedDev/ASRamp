@@ -14,7 +14,9 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
     private Integer createdCount = 0;
     private Integer updatedCount = 0;
     private Integer restoredCount = 0;
+    @TestVisible
     private Integer errorCount = 0;
+    @TestVisible
     private List<String> errors = new List<String>();
 
     // Lazily-populated map of (SF Account Id -> Ramp vendor UUID) for vendors
@@ -129,23 +131,48 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
         // ── DML after all callouts ──────────────────────────────────────────
 
         if (!toRestore.isEmpty()) {
-            try {
-                update toRestore;
-                restoredCount += toRestore.size();
-            } catch (Exception e) {
-                errorCount++;
-                errors.add('Restore batch: ' + e.getMessage());
-            }
+            restoredCount += updateAllowingPartialSuccess(toRestore, 'Restore');
         }
 
         if (!newlyStamped.isEmpty()) {
-            try {
-                update newlyStamped;
-            } catch (Exception e) {
-                errorCount++;
-                errors.add('Stamp new vendors: ' + e.getMessage());
-            }
+            updateAllowingPartialSuccess(newlyStamped, 'Stamp new vendor');
         }
+    }
+
+    /**
+     * @description Updates records with partial success, recording one error per
+     * failed row.
+     *
+     * All-or-nothing DML is wrong here: a single Account that trips an org
+     * validation rule (e.g. a required Billing Country) would discard the whole
+     * chunk, leaving up to 199 healthy vendors unstamped. Those vendors are then
+     * re-bucketed and re-fail on every later run, so the sync can never make
+     * progress — "Retry Sync" appears to do nothing.
+     * @param records The Accounts to update
+     * @param context Short label prefixed to each error message
+     * @return The number of records that saved successfully
+     */
+    @TestVisible
+    private Integer updateAllowingPartialSuccess(List<Account> records, String context) {
+        Integer saved = 0;
+        List<Database.SaveResult> results = Database.update(records, false);
+
+        for (Integer i = 0; i < results.size(); i++) {
+            if (results[i].isSuccess()) {
+                saved++;
+                continue;
+            }
+            errorCount++;
+            List<String> messages = new List<String>();
+            for (Database.Error err : results[i].getErrors()) {
+                messages.add(err.getMessage());
+            }
+            // newlyStamped rows carry only Id + Ramp_Vendor_Id__c, so fall back
+            // to the Id when Name was never loaded.
+            String label = String.isNotBlank(records[i].Name) ? records[i].Name : String.valueOf(records[i].Id);
+            errors.add(context + ' ' + label + ': ' + String.join(messages, '; '));
+        }
+        return saved;
     }
 
     /**
@@ -234,12 +261,18 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
      * @description Updates an existing vendor in Ramp via PATCH.
      * Always sends the code field so that cleared AccountNumber values are
      * reflected in Ramp (omitting the field would leave the old value in place).
+     *
+     * A cleared AccountNumber must be sent as an EMPTY STRING, never null: Ramp
+     * types `code` as a non-nullable string and documents the empty string as the
+     * way to reset it. JSON.serialize keeps explicit nulls for map entries, so
+     * sending null produced a 422 "Field may not be null." on every vendor whose
+     * AccountNumber was blank.
      * @param acc The Account to update
      */
     private void updateVendor(Account acc) {
         Map<String, Object> requestBody = new Map<String, Object>{
             'name' => acc.Name,
-            'code' => String.isBlank(acc.AccountNumber) ? null : acc.AccountNumber
+            'code' => acc.AccountNumber == null ? '' : acc.AccountNumber
         };
 
         String body = JSON.serialize(requestBody);

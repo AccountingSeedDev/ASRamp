@@ -205,6 +205,53 @@ private class RampHomeControllerTest {
     }
 
     @IsTest
+    static void getHomeData_vendorSyncFailuresCountTowardFollowUpTotal() {
+        // Master-group failures are reported per job run, not per record, so they
+        // used to be excluded from failedTotal. The home page then rendered "All
+        // active pipelines healthy" (failedTotal == 0) directly above an error
+        // queue listing vendor sync errors, with a Review-errors button that
+        // looked dead (FS-15026).
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_VENDOR_SYNC,
+                AcctSeed__Processed__c = 30, AcctSeed__Succeeded__c = 0, AcctSeed__Failed__c = 30,
+                AcctSeed__Notes__c = 'Update ANA TRADING CORP: PATCH failed. Status: 422'
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            Integer masterFailures = 0;
+            for (RampHomeController.Failure f : d.failures) {
+                if ('master'.equals(f.groupKey)) masterFailures++;
+            }
+            System.assertEquals(1, masterFailures, 'Vendor sync AJR failure should surface in the error queue');
+            System.assert(d.failedTotal > 0,
+                'The health banner must not read healthy while master failures are queued: failedTotal=' + d.failedTotal);
+        }
+    }
+
+    @IsTest
+    static void getHomeData_noFailuresKeepsFollowUpTotalAtZero() {
+        // Guards the inverse: a clean run must still report zero, so the banner
+        // does not flip to "needs attention" on a healthy org.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_VENDOR_SYNC,
+                AcctSeed__Processed__c = 30, AcctSeed__Succeeded__c = 30, AcctSeed__Failed__c = 0
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            System.assertEquals(0, d.failedTotal, 'A successful vendor sync must not inflate the follow-up total');
+            System.assert(d.failures.isEmpty(), 'No failures should be queued for a clean run');
+        }
+    }
+
+    @IsTest
     static void getHomeData_masterStepRemainsCompleteAfterAddingNewGLAccount() {
         System.runAs(TestDataFactory.getInstance().getAdminUser()) {
             // Mark one GL Account as synced — simulates initial setup complete.

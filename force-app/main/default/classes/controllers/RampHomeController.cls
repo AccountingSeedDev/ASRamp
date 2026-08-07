@@ -178,6 +178,17 @@ public with sharing class RampHomeController {
             }
 
             d.failures = recentFailures(ajr);
+
+            // Master-group failures (vendors / GL accounts / variables) are reported
+            // per job run rather than per record, so they are absent from the
+            // tx/bill/reimb tallies above. They must still count toward the
+            // follow-up total: otherwise the home banner reads "All active pipelines
+            // healthy" and the Need-follow-up KPI reads 0 while the error queue
+            // directly below lists vendor sync errors.
+            for (Failure f : d.failures) {
+                if ('master'.equals(f.groupKey)) d.failedTotal++;
+            }
+
             return d;
         } catch (Exception e) {
             throw new AuraHandledException('Error loading Ramp home: ' + e.getMessage());

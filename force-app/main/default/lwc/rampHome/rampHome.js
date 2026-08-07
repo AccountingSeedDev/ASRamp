@@ -280,6 +280,14 @@ export default class RampHome extends NavigationMixin(LightningElement) {
     reviewErrors() {
         if (this.failures.some((f) => f.groupKey === 'transaction')) this.pipeTab = 'transaction';
         else if (this.failures.some((f) => f.groupKey === 'master')) this.pipeTab = 'master';
+        // Setting the tab alone is invisible: the Sync-pipelines section sits below
+        // the KPI row, and the tab we select is often the one already showing. Scroll
+        // it into view so the button always does something the user can see.
+        // eslint-disable-next-line @lwc/lwc/no-async-operation
+        window.requestAnimationFrame(() => {
+            const el = this.template.querySelector('.ptabs');
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
     }
 
     // ── configuration modal ──
