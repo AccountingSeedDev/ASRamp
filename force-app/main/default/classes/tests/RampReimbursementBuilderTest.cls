@@ -110,6 +110,40 @@ private class RampReimbursementBuilderTest {
     }
 
     @IsTest
+    static void build_closedAccountingPeriod_fails() {
+        configure();
+
+        // Close the period covering the transaction date (FS-15065). Accounting Seed
+        // only blocks closed periods at post time and the payable is built
+        // "In Process", so without the builder's own check it would sync into it. AS
+        // refuses to close a period while an earlier one is open, so close the
+        // earliest and date the reimbursement into it.
+        AcctSeed__Accounting_Period__c period = [
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c
+            FROM AcctSeed__Accounting_Period__c
+            ORDER BY AcctSeed__Start_Date__c ASC LIMIT 1
+        ];
+        period.AcctSeed__Status__c = 'Closed';
+        update period;
+        Date d = period.AcctSeed__Start_Date__c;
+
+        RampReimbursementBuilder.Reimbursement r = sample('rb-closedperiod', 25.00, empEmail, 'APPROVED');
+        r.transaction_date = String.valueOf(d);
+
+        Test.startTest();
+        RampReimbursementBuilder.BuildResult res = RampReimbursementBuilder.build(
+            new List<RampReimbursementBuilder.Reimbursement>{ r });
+        Test.stopTest();
+
+        System.assertEquals(0, res.successful.size(), 'No payable may be built into a closed period');
+        System.assertEquals(1, res.failed.size(), 'Failed map should have one entry');
+        String reason = res.failed.get('rb-closedperiod');
+        System.assert(reason.contains('closed'), 'Error should say the period is closed: ' + reason);
+        System.assert(reason.contains(period.Name), 'Error should name the period: ' + reason);
+        System.assert(reason.contains(String.valueOf(d)), 'Error should name the date: ' + reason);
+    }
+
+    @IsTest
     static void build_inactiveGLVariable_fails() {
         configure();
         User admin = TestDataFactory.getInstance().getAdminUser();

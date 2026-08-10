@@ -18,6 +18,8 @@
  */
 public with sharing class RampJournalEntryBuilder {
 
+    private static final String PERIOD_STATUS_OPEN = 'Open';
+
     // --------------------------------------------------------------------
     //  DTOs — match the Ramp Transaction OpenAPI response shape
     // --------------------------------------------------------------------
@@ -166,11 +168,15 @@ public with sharing class RampJournalEntryBuilder {
         Id suspenseGLId = RampSyncSettingsService.getSuspenseGLId();
         String defaultStatus = RampSyncSettingsService.getDefaultJEStatus();
 
-        // 3. Bulk-resolve Accounting Periods. AS enforces that every JE has a
-        // period and that period is open; we look the period up by date.
+        // 3. Bulk-resolve Accounting Periods. Every JE needs a period, and that
+        // period must be Open — Accounting Seed only enforces this at post time,
+        // and the JEs we build are "In Process", so a Closed period would sail
+        // through and strand the JE (FS-15065). Carry each period's status so
+        // buildTransactionLines can fail the transaction with a usable message.
         Map<Date, Id> periodByDate = new Map<Date, Id>();
         Map<Id, String> periodNameById = new Map<Id, String>();
         Map<Id, Date> periodEndById = new Map<Id, Date>();
+        Set<Id> closedPeriodIds = new Set<Id>();
         Set<Date> allDates = new Set<Date>();
         for (RampTransaction txn : transactions) {
             Date d = parseDate(txn.accounting_date != null ? txn.accounting_date : txn.user_transaction_time);
@@ -184,12 +190,13 @@ public with sharing class RampJournalEntryBuilder {
                 if (maxDate == null || d > maxDate) maxDate = d;
             }
             for (AcctSeed__Accounting_Period__c p : [
-                SELECT Id, Name, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
+                SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
                 FROM AcctSeed__Accounting_Period__c
                 WHERE AcctSeed__Start_Date__c <= :maxDate AND AcctSeed__End_Date__c >= :minDate
             ]) {
                 periodNameById.put(p.Id, p.Name);
                 periodEndById.put(p.Id, p.AcctSeed__End_Date__c);
+                if (p.AcctSeed__Status__c != PERIOD_STATUS_OPEN) closedPeriodIds.add(p.Id);
                 for (Date d : allDates) {
                     if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) {
                         periodByDate.put(d, p.Id);
@@ -223,6 +230,11 @@ public with sharing class RampJournalEntryBuilder {
                 result.failed.put(txn.id,
                     'No Accounting Period in Accounting Seed covers date ' + String.valueOf(txnDate) +
                     '. Open a period that includes this date or adjust the transaction accounting_date in Ramp.');
+                continue;
+            }
+            if (closedPeriodIds.contains(periodId)) {
+                result.failed.put(txn.id, closedPeriodMessage(periodNameById.get(periodId), txnDate,
+                    'transaction accounting_date'));
                 continue;
             }
 
@@ -914,6 +926,17 @@ public with sharing class RampJournalEntryBuilder {
     // --------------------------------------------------------------------
     //  Date parsing
     // --------------------------------------------------------------------
+
+    /**
+     * @description Wording for a Closed-period failure (FS-15065). Names both the
+     * period and the date that landed in it, so the error queue entry is actionable
+     * without opening Ramp.
+     */
+    private static String closedPeriodMessage(String periodName, Date d, String dateFieldLabel) {
+        return 'Accounting Period ' + (String.isBlank(periodName) ? '(unnamed)' : periodName)
+            + ' covering date ' + String.valueOf(d) + ' is closed in Accounting Seed. '
+            + 'Reopen the period or adjust the ' + dateFieldLabel + ' in Ramp.';
+    }
 
     private static Date parseDate(String isoOrDate) {
         if (String.isBlank(isoOrDate)) return null;

@@ -107,6 +107,27 @@ private class RampJournalEntryBuilderTest {
         return periods.isEmpty() ? Date.today() : periods[0].AcctSeed__Start_Date__c;
     }
 
+    /**
+     * @description Close an Accounting Period and return it, so a test can assert the
+     * builder rejects records dated into it (FS-15065). Accounting Seed refuses to
+     * close a period while an earlier one is still open, so this closes the EARLIEST
+     * period — callers should date their transaction inside it.
+     */
+    private static AcctSeed__Accounting_Period__c closeEarliestPeriod() {
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        AcctSeed__Accounting_Period__c period = [
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c
+            FROM AcctSeed__Accounting_Period__c
+            ORDER BY AcctSeed__Start_Date__c ASC
+            LIMIT 1
+        ];
+        System.runAs(admin) {
+            period.AcctSeed__Status__c = 'Closed';
+            update period;
+        }
+        return period;
+    }
+
     private static RampJournalEntryBuilder.RampTransaction sampleTransaction(String id, Decimal amount, String glUuid) {
         return sampleTransactionOn(id, amount, glUuid, pickPeriodDate());
     }
@@ -474,6 +495,54 @@ private class RampJournalEntryBuilderTest {
         System.assertEquals(0, result.successful.size());
         System.assertEquals(1, result.failed.size());
         System.assert(result.failed.get('txn-fail').contains('Could not resolve a GL Account'));
+    }
+
+    @IsTest
+    static void build_closedAccountingPeriod_failsTransaction() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        AcctSeed__GL_Account__c codedGL = createCodedGL('Expense-TEST', 'gl-uuid-closed');
+
+        // Close the period the transaction date falls into (FS-15065). Accounting
+        // Seed only blocks closed periods at post time, so without the builder's
+        // own check this transaction would sync into a closed period.
+        AcctSeed__Accounting_Period__c period = closeEarliestPeriod();
+        Date d = period.AcctSeed__Start_Date__c;
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransactionOn('txn-closed', 75.0, 'gl-uuid-closed', d);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, result.successful.size(), 'No JE may be built into a closed period');
+        System.assertEquals(1, result.failed.size(), 'Transaction should be reported as failed');
+        String reason = result.failed.get('txn-closed');
+        System.assert(reason.contains('closed'), 'Error should say the period is closed: ' + reason);
+        System.assert(reason.contains(period.Name), 'Error should name the period: ' + reason);
+        System.assert(reason.contains(String.valueOf(d)), 'Error should name the date: ' + reason);
+    }
+
+    @IsTest
+    static void build_openAccountingPeriod_stillSucceeds() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('Expense-TEST', 'gl-uuid-open');
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-open-period', 40.0, 'gl-uuid-open');
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size(), 'Open period must still build: ' + result.failed);
+        System.assertEquals(0, result.failed.size(), 'Open period must not fail: ' + result.failed);
     }
 
     @IsTest

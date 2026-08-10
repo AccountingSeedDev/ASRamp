@@ -181,6 +181,40 @@ private class RampBillBuilderTest {
     }
 
     @IsTest
+    static void build_closedAccountingPeriod_failsBill() {
+        configure();
+        Id vId = vendorAccount('ClosedPeriod Vendor');
+
+        // Close the period covering the bill date (FS-15065). Accounting Seed only
+        // blocks closed periods at post time and the payable is built "In Process",
+        // so without the builder's own check the bill would sync into it. AS refuses
+        // to close a period while an earlier one is open, so close the earliest and
+        // date the bill into it.
+        AcctSeed__Accounting_Period__c period = [
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c
+            FROM AcctSeed__Accounting_Period__c
+            ORDER BY AcctSeed__Start_Date__c ASC LIMIT 1
+        ];
+        period.AcctSeed__Status__c = 'Closed';
+        update period;
+        Date d = period.AcctSeed__Start_Date__c;
+
+        RampBillBuilder.Bill b = sampleBill('bill-closedperiod', 5000, null, vId);
+        b.issued_at = String.valueOf(d) + 'T00:00:00+00:00';
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(0, r.successful.size(), 'No payable may be built into a closed period');
+        System.assertEquals(1, r.failed.size(), 'Failed map should have one entry');
+        String reason = r.failed.get('bill-closedperiod');
+        System.assert(reason.contains('closed'), 'Error should say the period is closed: ' + reason);
+        System.assert(reason.contains(period.Name), 'Error should name the period: ' + reason);
+        System.assert(reason.contains(String.valueOf(d)), 'Error should name the date: ' + reason);
+    }
+
+    @IsTest
     static void build_inactiveGLVariable_failsBill() {
         configure();
         Id vId = vendorAccount('InactiveVar Vendor');
