@@ -498,6 +498,38 @@ private class RampJournalEntryBuilderTest {
     }
 
     @IsTest
+    static void build_referenceLookupOff_blanksAttributionSoStaleValuesClear() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-stale-1');
+
+        // Reference Lookup off (the default) — every field a matched row could have
+        // written must still be present on the built line, explicitly null, so the
+        // upsert clears whatever a previous reference-enabled run applied (FS-15092).
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-stale', 30.0, 'gl-stale-1');
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult res = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        AcctSeed__Journal_Entry_Line__c debit = res.successful[0].lines[0];
+        Map<String, Object> fields = debit.getPopulatedFieldsAsMap();
+        for (String f : new List<String>{
+            'AcctSeed__Project__c', 'AcctSeed__Project_Task__c', 'AcctSeed__Product__c',
+            'AcctSeed__Account__c', 'AcctSeed__Employee__c', 'AcctSeed__Reference__c',
+            'AcctSeed__GL_Account_Variable_1__c', 'AcctSeed__GL_Account_Variable_2__c',
+            'AcctSeed__GL_Account_Variable_3__c', 'AcctSeed__GL_Account_Variable_4__c'
+        }) {
+            System.assert(fields.containsKey(f),
+                f + ' must be assigned (even as null) so a re-sync clears a stale value');
+            System.assertEquals(null, fields.get(f), f + ' should be null when nothing sets it');
+        }
+    }
+
+    @IsTest
     static void build_closedAccountingPeriod_failsTransaction() {
         TestDataFactory.getInstance();
         configureSettings('CardClearing-TEST', 'Ledger-TEST');
