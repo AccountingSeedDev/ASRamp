@@ -15,6 +15,7 @@ public with sharing class RampReimbursementBuilder {
     private static final String PAYABLE_STATUS = 'In Process';
     private static final Set<String> SKIP_TYPES = new Set<String>{ 'PAYBACK_FULL', 'PAYBACK_PARTIAL' };
     private static final String PAID_STATE = 'REIMBURSED';
+    private static final String PERIOD_STATUS_OPEN = 'Open';
 
     // --------------------------------------------------------------------
     //  DTOs — GET /developer/v1/reimbursements (Reimbursement resource)
@@ -119,7 +120,7 @@ public with sharing class RampReimbursementBuilder {
         Id ledgerId = RampSyncSettingsService.getDefaultLedgerId();
         Id suspenseGLId = RampSyncSettingsService.getSuspenseGLId();
         Id bankGLId = RampSyncSettingsService.getBillPaymentBankGLIdOrNull();
-        Map<Date, Id> periodByDate = resolvePeriods(reimbursements);
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = resolvePeriods(reimbursements);
 
         for (Reimbursement r : reimbursements) {
             // Skip paybacks / employee-owes-business.
@@ -138,7 +139,8 @@ public with sharing class RampReimbursementBuilder {
 
     private static ReimbursementBuild buildOne(
         Reimbursement r, Map<String, Id> employeeByRampUserId, Map<String, Id> glByUuid,
-        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Map<Date, Id> periodByDate,
+        Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate,
         Id ledgerId, Id suspenseGLId, Id bankGLId
     ) {
         if (String.isBlank(r.id)) throw new BuildException('Reimbursement missing id');
@@ -150,10 +152,14 @@ public with sharing class RampReimbursementBuilder {
 
         Date txnDate = parseDate(r.transaction_date != null ? r.transaction_date : r.accounting_date);
         if (txnDate == null) throw new BuildException('Could not parse a usable date from transaction_date/accounting_date');
-        Id periodId = periodByDate.get(txnDate);
-        if (periodId == null) {
+        AcctSeed__Accounting_Period__c period = periodByDate.get(txnDate);
+        if (period == null) {
             throw new BuildException('No Accounting Period in Accounting Seed covers date ' + String.valueOf(txnDate) + '.');
         }
+        if (period.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+            throw new BuildException(closedPeriodMessage(period.Name, txnDate, 'transaction_date'));
+        }
+        Id periodId = period.Id;
 
         ReimbursementBuild rb = new ReimbursementBuild();
         rb.reimbursementId = r.id;
@@ -189,7 +195,13 @@ public with sharing class RampReimbursementBuilder {
             for (AcctSeed__Account_Payable_Line__c ln : rb.lines) total += ln.AcctSeed__Amount__c;
             Date payDate = parseDate(r.payment_processed_at);
             if (payDate == null) payDate = txnDate;
-            Id payPeriod = periodByDate.get(payDate);
+            AcctSeed__Accounting_Period__c payPeriodRec = periodByDate.get(payDate);
+            // A closed payment period fails the whole reimbursement rather than silently
+            // dropping the disbursement, which would leave the payable looking unpaid.
+            if (payPeriodRec != null && payPeriodRec.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+                throw new BuildException(closedPeriodMessage(payPeriodRec.Name, payDate, 'payment_processed_at date'));
+            }
+            Id payPeriod = (payPeriodRec != null) ? payPeriodRec.Id : null;
             if (payPeriod != null) {
                 AcctSeed__Cash_Disbursement__c cd = new AcctSeed__Cash_Disbursement__c();
                 cd.AcctSeed__ExtId__c = r.id + ':cd';
@@ -323,8 +335,14 @@ public with sharing class RampReimbursementBuilder {
         return result;
     }
 
-    private static Map<Date, Id> resolvePeriods(List<Reimbursement> reimbursements) {
-        Map<Date, Id> periodByDate = new Map<Date, Id>();
+    /**
+     * @description Date -> covering Accounting Period. Returns the period record (not
+     * just its Id) so callers can reject a Closed period with a message naming it —
+     * Accounting Seed only blocks closed periods at post time, and the records we
+     * build are non-posted, so an unchecked Closed period strands them (FS-15065).
+     */
+    private static Map<Date, AcctSeed__Accounting_Period__c> resolvePeriods(List<Reimbursement> reimbursements) {
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = new Map<Date, AcctSeed__Accounting_Period__c>();
         Set<Date> allDates = new Set<Date>();
         for (Reimbursement r : reimbursements) {
             Date d = parseDate(r.transaction_date != null ? r.transaction_date : r.accounting_date);
@@ -336,12 +354,24 @@ public with sharing class RampReimbursementBuilder {
         Date minDate, maxDate;
         for (Date d : allDates) { if (minDate == null || d < minDate) minDate = d; if (maxDate == null || d > maxDate) maxDate = d; }
         for (AcctSeed__Accounting_Period__c p : [
-            SELECT Id, AcctSeed__Start_Date__c, AcctSeed__End_Date__c FROM AcctSeed__Accounting_Period__c
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
+            FROM AcctSeed__Accounting_Period__c
             WHERE AcctSeed__Start_Date__c <= :maxDate AND AcctSeed__End_Date__c >= :minDate
         ]) {
-            for (Date d : allDates) if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p.Id);
+            for (Date d : allDates) if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p);
         }
         return periodByDate;
+    }
+
+    /**
+     * @description Wording for a Closed-period failure (FS-15065). Names both the
+     * period and the date that landed in it, so the error queue entry is actionable
+     * without opening Ramp.
+     */
+    private static String closedPeriodMessage(String periodName, Date d, String dateFieldLabel) {
+        return 'Accounting Period ' + (String.isBlank(periodName) ? '(unnamed)' : periodName)
+            + ' covering date ' + String.valueOf(d) + ' is closed in Accounting Seed. '
+            + 'Reopen the period or adjust the ' + dateFieldLabel + ' in Ramp.';
     }
 
     private static Date parseDate(String isoOrDate) {

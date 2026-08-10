@@ -16,6 +16,8 @@ public with sharing class RampBillBuilder {
     // safe, non-posted state.
     private static final String PAYABLE_STATUS = 'In Process';
 
+    private static final String PERIOD_STATUS_OPEN = 'Open';
+
     // CurrencyIsoCode only exists when Multi-Currency is enabled; put()'ing it in a
     // single-currency org throws SObjectException and would fail the whole run.
     private static final Boolean MULTI_CURRENCY = UserInfo.isMultiCurrencyOrganization();
@@ -147,7 +149,7 @@ public with sharing class RampBillBuilder {
         Id ledgerId = RampSyncSettingsService.getDefaultLedgerId();
         Id suspenseGLId = RampSyncSettingsService.getSuspenseGLId();
         Id bankGLId = RampSyncSettingsService.getBillPaymentBankGLIdOrNull(); // null → skip payment build
-        Map<Date, Id> periodByDate = resolvePeriods(bills);
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = resolvePeriods(bills);
 
         // 4. Per-bill build.
         for (Bill b : bills) {
@@ -163,7 +165,7 @@ public with sharing class RampBillBuilder {
     private static PayableBuild buildOne(
         Bill b, Map<String, Id> vendorByNativeId, Map<String, Id> glByUuid,
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Set<String> unusableVarUuids,
-        Map<Date, Id> periodByDate, Id ledgerId, Id suspenseGLId, Id bankGLId
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate, Id ledgerId, Id suspenseGLId, Id bankGLId
     ) {
         if (String.isBlank(b.id)) throw new BuildException('Bill missing id');
 
@@ -172,11 +174,15 @@ public with sharing class RampBillBuilder {
 
         Date billDate = parseDate(b.issued_at != null ? b.issued_at : b.accounting_date);
         if (billDate == null) throw new BuildException('Could not parse a usable date from issued_at/accounting_date');
-        Id periodId = periodByDate.get(billDate);
-        if (periodId == null) {
+        AcctSeed__Accounting_Period__c period = periodByDate.get(billDate);
+        if (period == null) {
             throw new BuildException('No Accounting Period in Accounting Seed covers date ' + String.valueOf(billDate)
                 + '. Open a period that includes this date or adjust the bill date in Ramp.');
         }
+        if (period.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+            throw new BuildException(closedPeriodMessage(period.Name, billDate, 'bill date'));
+        }
+        Id periodId = period.Id;
 
         PayableBuild pb = new PayableBuild();
         pb.billId = b.id;
@@ -220,7 +226,13 @@ public with sharing class RampBillBuilder {
                 (b.payment != null && b.payment.payment_date != null) ? b.payment.payment_date : b.paid_at
             );
             if (payDate == null) payDate = billDate; // fall back to the bill date
-            Id payPeriod = periodByDate.get(payDate);
+            AcctSeed__Accounting_Period__c payPeriodRec = periodByDate.get(payDate);
+            // A closed payment period fails the whole bill rather than silently
+            // dropping the disbursement, which would leave the payable looking unpaid.
+            if (payPeriodRec != null && payPeriodRec.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+                throw new BuildException(closedPeriodMessage(payPeriodRec.Name, payDate, 'payment date'));
+            }
+            Id payPeriod = (payPeriodRec != null) ? payPeriodRec.Id : null;
             if (payAmt != null && payPeriod != null) {
                 AcctSeed__Cash_Disbursement__c cd = new AcctSeed__Cash_Disbursement__c();
                 cd.AcctSeed__ExtId__c = b.id + ':cd';
@@ -415,8 +427,14 @@ public with sharing class RampBillBuilder {
         }
     }
 
-    private static Map<Date, Id> resolvePeriods(List<Bill> bills) {
-        Map<Date, Id> periodByDate = new Map<Date, Id>();
+    /**
+     * @description Date -> covering Accounting Period. Returns the period record (not
+     * just its Id) so callers can reject a Closed period with a message naming it —
+     * Accounting Seed only blocks closed periods at post time, and the records we
+     * build are non-posted, so an unchecked Closed period strands them (FS-15065).
+     */
+    private static Map<Date, AcctSeed__Accounting_Period__c> resolvePeriods(List<Bill> bills) {
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = new Map<Date, AcctSeed__Accounting_Period__c>();
         Set<Date> allDates = new Set<Date>();
         for (Bill b : bills) {
             Date d = parseDate(b.issued_at != null ? b.issued_at : b.accounting_date);
@@ -432,15 +450,26 @@ public with sharing class RampBillBuilder {
             if (maxDate == null || d > maxDate) maxDate = d;
         }
         for (AcctSeed__Accounting_Period__c p : [
-            SELECT Id, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
             FROM AcctSeed__Accounting_Period__c
             WHERE AcctSeed__Start_Date__c <= :maxDate AND AcctSeed__End_Date__c >= :minDate
         ]) {
             for (Date d : allDates) {
-                if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p.Id);
+                if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p);
             }
         }
         return periodByDate;
+    }
+
+    /**
+     * @description Wording for a Closed-period failure (FS-15065). Names both the
+     * period and the date that landed in it, so the error queue entry is actionable
+     * without opening Ramp.
+     */
+    private static String closedPeriodMessage(String periodName, Date d, String dateFieldLabel) {
+        return 'Accounting Period ' + (String.isBlank(periodName) ? '(unnamed)' : periodName)
+            + ' covering date ' + String.valueOf(d) + ' is closed in Accounting Seed. '
+            + 'Reopen the period or adjust the ' + dateFieldLabel + ' in Ramp.';
     }
 
     private static Date parseDate(String isoOrDate) {
