@@ -200,6 +200,77 @@ private class RampTransactionServiceTest {
     // --------------------------------------------------------------------
 
     /** Common base — handles the OAuth /token call once, then defers to respondToApi. */
+    @IsTest
+    static void syncPage_succeededCountIsTalliedNotInferred() {
+        String glUuid = configureForSync();
+        Test.setMock(HttpCalloutMock.class, new SinglePageMock(glUuid));
+
+        Test.startTest();
+        RampTransactionService.PageResult result = RampTransactionService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(1, result.succeededCount,
+            'A transaction that reached a persisted JE must be counted as succeeded: ' + result.errorMessages);
+        System.assertEquals(0, result.failedCount, 'Errors: ' + result.errorMessages);
+        System.assertEquals(result.transactionsFetched, result.succeededCount + result.failedCount,
+            'processed must equal succeeded + failed');
+    }
+
+    @IsTest
+    static void syncPage_buildFailureIsNotCountedAsSuccess() {
+        configureForSync();
+        Test.setMock(HttpCalloutMock.class, new UnknownGLMock());
+
+        Test.startTest();
+        RampTransactionService.PageResult result = RampTransactionService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(0, result.succeededCount,
+            'A transaction that produced no JE must never be counted as succeeded');
+        System.assertEquals(1, result.failedCount);
+        System.assertEquals(result.transactionsFetched, result.succeededCount + result.failedCount,
+            'processed must equal succeeded + failed');
+    }
+
+    @IsTest
+    static void syncPage_silentlyDroppedTransactionIsReportedNotCountedAsSuccess() {
+        // A transaction with no usable id is skipped by the builder without entering
+        // BuildResult.failed. Deriving success as (fetched - failed) reported it as a
+        // clean sync with no JE and no error — the FS-15031 symptom. It must now be
+        // surfaced as a failure instead.
+        configureForSync();
+        Test.setMock(HttpCalloutMock.class, new BlankIdMock());
+
+        Test.startTest();
+        RampTransactionService.PageResult result = RampTransactionService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(1, result.transactionsFetched);
+        System.assertEquals(0, result.succeededCount, 'A dropped transaction is not a success');
+        System.assertEquals(1, result.failedCount, 'The drop must be reported as a failure');
+        System.assertEquals(0, [SELECT COUNT() FROM AcctSeed__Journal_Entry__c], 'No JE should exist');
+
+        Boolean explained = false;
+        for (String m : result.errorMessages) {
+            if (m.contains('neither a Journal Entry nor an error')) explained = true;
+        }
+        System.assert(explained, 'The run must say why the count does not add up: ' + result.errorMessages);
+    }
+
+    /** Returns one transaction with a blank id — the builder's only silent-skip path. */
+    private class BlankIdMock extends BaseRampMock {
+        protected override HttpResponse respondToApi(HttpRequest req, HttpResponse res) {
+            if (req.getEndpoint().contains('/transactions')) {
+                res.setStatusCode(200);
+                res.setBody(buildTransactionsResponse('expense-gl-uuid', '', null));
+            } else if (req.getEndpoint().contains('/accounting/syncs')) {
+                res.setStatusCode(201);
+                res.setBody('{"id":"sync-resource-uuid"}');
+            }
+            return res;
+        }
+    }
+
     private abstract class BaseRampMock implements HttpCalloutMock {
         protected Integer callCount = 0;
 
