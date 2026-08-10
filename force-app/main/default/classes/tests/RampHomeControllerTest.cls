@@ -252,6 +252,60 @@ private class RampHomeControllerTest {
     }
 
     @IsTest
+    static void getHomeData_cardBuildFailures_surfacedInErrorQueue() {
+        // Card transactions that fail to build (unresolved GL, no open period) never
+        // persist a Journal Entry, so there is no per-record row to query. Reproduced
+        // live against the Ramp sandbox: AJR reported 5 failed while the error queue
+        // returned 0 rows and the banner read "All active pipelines healthy" (FS-15031).
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_CARD_SYNC,
+                AcctSeed__Processed__c = 5, AcctSeed__Succeeded__c = 0, AcctSeed__Failed__c = 5,
+                AcctSeed__Notes__c = 'fff94db5: Could not resolve a GL Account for transaction fff94db5 (line ordinal 0).'
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            Boolean foundCardFailure = false;
+            for (RampHomeController.Failure f : d.failures) {
+                if ('txn'.equals(f.pipe)) { foundCardFailure = true; break; }
+            }
+            System.assert(foundCardFailure, 'AJR-based card failure should surface in the error queue');
+            System.assertEquals(5, d.failedTotal,
+                'The run\'s 5 failures must reach the follow-up total: failedTotal=' + d.failedTotal);
+        }
+    }
+
+    @IsTest
+    static void getHomeData_cardHardPageFailure_surfacedDespiteZeroCounts() {
+        // When syncPage() throws outright, the run is logged with every count at zero
+        // and the reason only in Notes. Keying the error queue on Failed__c > 0 alone
+        // would miss it entirely — observed live with an unconfigured Card Clearing GL.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insert new AcctSeed__Automated_Job_Results__c(
+                AcctSeed__Schedule_Job_Type__c = RampJobResultLogger.JOB_CARD_SYNC,
+                AcctSeed__Processed__c = 0, AcctSeed__Succeeded__c = 0, AcctSeed__Failed__c = 0,
+                AcctSeed__Notes__c = 'Page failed at cursor=null: No "Ramp Card Clearing" GL Account is configured for the sync ledger.'
+            );
+
+            Test.startTest();
+            RampHomeController.HomeData d = RampHomeController.getHomeData();
+            Test.stopTest();
+
+            Boolean foundCardFailure = false;
+            for (RampHomeController.Failure f : d.failures) {
+                if ('txn'.equals(f.pipe)) { foundCardFailure = true; break; }
+            }
+            System.assert(foundCardFailure,
+                'A hard page failure logged as 0/0/0 must still surface in the error queue');
+            System.assert(d.failedTotal > 0,
+                'The banner must not read healthy while that row is queued: failedTotal=' + d.failedTotal);
+        }
+    }
+
+    @IsTest
     static void getHomeData_masterStepRemainsCompleteAfterAddingNewGLAccount() {
         System.runAs(TestDataFactory.getInstance().getAdminUser()) {
             // Mark one GL Account as synced — simulates initial setup complete.

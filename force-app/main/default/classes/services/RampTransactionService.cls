@@ -23,6 +23,10 @@ public with sharing class RampTransactionService {
         public Integer journalEntriesCreated = 0;
         public Integer journalEntriesUpdated = 0;
         public Integer failedCount = 0;
+        // Counted from transactions that actually reached a persisted Journal Entry —
+        // never inferred as (fetched - failed), which reports a silently dropped
+        // transaction as a success (FS-15031).
+        public Integer succeededCount = 0;
         public String nextCursor;
         public Boolean isLastPage { get { return String.isBlank(nextCursor); } set; }
         public List<String> errorMessages = new List<String>();
@@ -171,6 +175,18 @@ public with sharing class RampTransactionService {
 
         if (!orphanHeaders.isEmpty()) {
             Database.update(orphanHeaders, false);
+        }
+
+        // Success is counted, not inferred. Anything fetched that produced neither a
+        // Journal Entry nor a recorded failure is a silent drop — report it rather
+        // than let it inflate the success count and show a clean run (FS-15031).
+        result.succeededCount = successfulSyncs.size();
+        Integer unaccounted = result.transactionsFetched - result.succeededCount - result.failedCount;
+        if (unaccounted > 0) {
+            result.failedCount += unaccounted;
+            result.errorMessages.add(unaccounted + ' transaction(s) were returned by Ramp but produced ' +
+                'neither a Journal Entry nor an error. This is a defect in the sync — please report it ' +
+                'with the run date so the transactions can be identified.');
         }
 
         // 6. Fire the /accounting/syncs POST async so it runs after this
