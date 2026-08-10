@@ -475,6 +475,50 @@ private class RampConfigurationControllerTest {
     }
 
     @IsTest
+    static void saveReferenceLookupConfig_enabledWithBlankTemplate_isRejected() {
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'Actual',
+            Default_JE_Status__c = 'In Process',
+            Sync_Grouping__c = 'Daily',
+            Enable_Reference_Lookup__c = true,
+            Reference_Key_Template__c = '{merchant_name}'
+        );
+
+        // Enabled + blank template stores a feature that is on but can never match a
+        // row, with nothing to explain why (FS-15092). It must be refused.
+        Test.startTest();
+        for (String blank : new List<String>{ null, '', '   ' }) {
+            Boolean threw = false;
+            try {
+                RampConfigurationController.saveReferenceLookupConfig(true, blank);
+            } catch (AuraHandledException e) {
+                threw = true;
+            }
+            System.assert(threw, 'Enabling with a blank template should be rejected: "' + blank + '"');
+        }
+        Test.stopTest();
+    }
+
+    @IsTest
+    static void saveReferenceLookupConfig_disabledWithBlankTemplate_isAllowed() {
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'Actual',
+            Default_JE_Status__c = 'In Process',
+            Sync_Grouping__c = 'Daily',
+            Enable_Reference_Lookup__c = true,
+            Reference_Key_Template__c = '{merchant_name}'
+        );
+
+        // Turning the feature off without a template is legitimate — the guard only
+        // applies when it is being enabled.
+        Test.startTest();
+        String msg = RampConfigurationController.saveReferenceLookupConfig(false, '');
+        Test.stopTest();
+
+        System.assert(msg.contains('saved'), 'Disabling with a blank template is valid: ' + msg);
+    }
+
+    @IsTest
     static void settingsDeployQueueable_runsWithoutError() {
         Test.startTest();
         System.enqueueJob(new RampSyncSettingsDeployQueueable(

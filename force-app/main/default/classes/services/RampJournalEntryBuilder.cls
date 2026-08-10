@@ -388,11 +388,11 @@ public with sharing class RampJournalEntryBuilder {
         String userId = (txn.card_holder != null) ? txn.card_holder.user_id : null;
         String email = String.isNotBlank(userId) ? emailByRampUserId.get(userId) : null;
         Id empId = String.isNotBlank(email) ? employeeByEmail.get(email.toLowerCase()) : null;
-        if (String.isNotBlank(email)) {
-            for (AcctSeed__Journal_Entry_Line__c l : lines) {
-                l.Ramp_User_Email__c = email;
-                l.AcctSeed__Employee__c = empId;
-            }
+        // Assigned unconditionally (null included) so a cardholder that stops
+        // resolving clears the stale attribution instead of leaving it (FS-15092).
+        for (AcctSeed__Journal_Entry_Line__c l : lines) {
+            l.Ramp_User_Email__c = email;
+            l.AcctSeed__Employee__c = empId;
         }
 
         // Ramp transaction id on every line — a direct handle for
@@ -404,10 +404,11 @@ public with sharing class RampJournalEntryBuilder {
         // Reference Lookup: stamp the computed key on every line (tracing), then
         // apply matched-row defaults to expense (debit) lines only — never the
         // clearing line, whose GL/coding must stay the offset.
-        if (String.isNotBlank(refKey)) {
-            for (AcctSeed__Journal_Entry_Line__c l : lines) {
-                l.AcctSeed__Reference__c = refKey;
-            }
+        // Stamped unconditionally so turning the feature off (or clearing the
+        // template) clears the key from lines it previously stamped (FS-15092).
+        String refValue = String.isNotBlank(refKey) ? refKey : null;
+        for (AcctSeed__Journal_Entry_Line__c l : lines) {
+            l.AcctSeed__Reference__c = refValue;
         }
         if (refRow != null) {
             for (AcctSeed__Journal_Entry_Line__c l : lines) {
@@ -439,6 +440,21 @@ public with sharing class RampJournalEntryBuilder {
         line.AcctSeed__Date__c = txnDate; // the Ramp transaction's own date, not the header's
         line.AcctSeed__Description__c = String.isNotBlank(lineMemo) ? lineMemo : txn.memo;
         line.Ramp_Vendor_Name__c = txn.merchant_name;
+
+        // Blank every field that Ramp coding or the Reference Lookup can populate,
+        // so each field is present in the upsert even when nothing sets it. Lines are
+        // keyed by Ramp txn id and re-upserted on every run: a field left unassigned
+        // is simply absent from the DML, so a value applied by an earlier run would
+        // survive forever after the coding or the matching reference row went away
+        // (FS-15092). Assigning null makes each re-sync authoritative.
+        line.AcctSeed__Employee__c = null;
+        line.AcctSeed__GL_Account_Variable_1__c = null;
+        line.AcctSeed__GL_Account_Variable_2__c = null;
+        line.AcctSeed__GL_Account_Variable_3__c = null;
+        line.AcctSeed__GL_Account_Variable_4__c = null;
+        line.AcctSeed__Project__c = null;
+        line.AcctSeed__Project_Task__c = null;
+        line.AcctSeed__Product__c = null;
 
         // Vendor Account (may stay null — never required):
         //   1. Accounting Vendor coding (line-level, then transaction-level).
