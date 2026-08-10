@@ -373,4 +373,61 @@ private class RampBillBuilderTest {
         System.assertEquals('bill-3:apd', pb.apDisbursement.AcctSeed__ExtId__c);
         System.assertEquals(120.00, pb.apDisbursement.AcctSeed__Paid_Amount__c);
     }
+
+    @IsTest
+    static void build_manualCheckPayment_createsCashDisbursementWithCheckType() {
+        configure();
+        Id vId = vendorAccount('Manual Check Vendor');
+        RampBillBuilder.Bill b = sampleBill('bill-manual-check', 10000, null, vId);
+        b.status = 'PAID';
+        b.paid_at = b.issued_at;
+        // Marked paid outside of Ramp: the rail is the generic PAID_MANUALLY and the
+        // method the user chose is nested in details (FS-15104).
+        b.payment = new RampBillBuilder.BillPayment();
+        b.payment.payment_method = 'PAID_MANUALLY';
+        b.payment.details = new RampBillBuilder.PaymentDetails();
+        b.payment.details.manual_payment_method = 'CHECK';
+        b.payment.payment_date = String.valueOf(openPeriodDate());
+        RampBillBuilder.CurrencyAmount pamt = new RampBillBuilder.CurrencyAmount();
+        pamt.amount = 10000; pamt.currency_code = 'USD'; pamt.minor_unit_conversion_rate = 100;
+        b.payment.amount = pamt;
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(), 'Errors: ' + r.failed);
+        System.assertEquals('Check', r.successful[0].cashDisbursement.AcctSeed__Type__c,
+            'PAID_MANUALLY with manual_payment_method CHECK should map to Check');
+    }
+
+    @IsTest
+    static void mapPayType_coversManualAndDirectMethods() {
+        // Paid through Ramp: the rail itself decides.
+        System.assertEquals('Check', RampBillBuilder.mapPayType(payment('CHECK', null)));
+        System.assertEquals('Electronic', RampBillBuilder.mapPayType(payment('ACH', null)));
+        System.assertEquals('Electronic', RampBillBuilder.mapPayType(payment('DOMESTIC_WIRE', null)));
+
+        // Paid outside Ramp: the nested manual method decides.
+        System.assertEquals('Check', RampBillBuilder.mapPayType(payment('PAID_MANUALLY', 'CHECK')));
+        System.assertEquals('Electronic', RampBillBuilder.mapPayType(payment('PAID_MANUALLY', 'CASH')));
+        System.assertEquals('Electronic',
+            RampBillBuilder.mapPayType(payment('PAID_MANUALLY', 'NON_RAMP_CREDIT_CARD')));
+
+        // Degenerate payloads must not throw.
+        System.assertEquals('Electronic', RampBillBuilder.mapPayType(null));
+        System.assertEquals('Electronic', RampBillBuilder.mapPayType(payment('PAID_MANUALLY', null)));
+        System.assertEquals('Electronic', RampBillBuilder.mapPayType(payment(null, null)));
+    }
+
+    /** Build a BillPayment carrying a rail and (optionally) a nested manual method. */
+    private static RampBillBuilder.BillPayment payment(String method, String manualMethod) {
+        RampBillBuilder.BillPayment p = new RampBillBuilder.BillPayment();
+        p.payment_method = method;
+        if (manualMethod != null) {
+            p.details = new RampBillBuilder.PaymentDetails();
+            p.details.manual_payment_method = manualMethod;
+        }
+        return p;
+    }
 }
