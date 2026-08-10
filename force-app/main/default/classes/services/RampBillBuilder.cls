@@ -18,6 +18,10 @@ public with sharing class RampBillBuilder {
 
     private static final String PERIOD_STATUS_OPEN = 'Open';
 
+    // Ramp's payment_method for a bill marked paid outside of Ramp. The method the
+    // user actually chose lives in payment.details.manual_payment_method.
+    private static final String PAID_MANUALLY = 'PAID_MANUALLY';
+
     // CurrencyIsoCode only exists when Multi-Currency is enabled; put()'ing it in a
     // single-currency org throws SObjectException and would fail the whole run.
     private static final Boolean MULTI_CURRENCY = UserInfo.isMultiCurrencyOrganization();
@@ -85,6 +89,17 @@ public with sharing class RampBillBuilder {
         public String payment_method;
         public String payment_date;
         public String effective_date;
+        public PaymentDetails details;   // method-specific; carries the manual method
+    }
+
+    /**
+     * @description Method-specific payment detail (ApiPaymentDetailsResource). Only
+     * the manual-payment variant carries a field we need: when a bill is marked paid
+     * outside of Ramp, payment_method is the generic 'PAID_MANUALLY' and the method
+     * the user actually picked lands here.
+     */
+    public class PaymentDetails {
+        public String manual_payment_method;   // CHECK, CASH, NON_RAMP_CREDIT_CARD, …
     }
 
     public class CurrencyAmount {
@@ -244,7 +259,7 @@ public with sharing class RampBillBuilder {
                 cd.AcctSeed__Bank_Account__c = bankGLId;
                 cd.AcctSeed__Source__c = 'Payable';
                 cd.AcctSeed__Status__c = 'In Process';
-                cd.AcctSeed__Type__c = mapPayType(b.payment != null ? b.payment.payment_method : null);
+                cd.AcctSeed__Type__c = mapPayType(b.payment);
                 cd.Ramp_Sync_Status__c = 'Pending';
                 if (MULTI_CURRENCY && b.amount != null && String.isNotBlank(b.amount.currency_code)) {
                     cd.put('CurrencyIsoCode', b.amount.currency_code);
@@ -264,10 +279,25 @@ public with sharing class RampBillBuilder {
         return pb;
     }
 
-    /** Map Ramp payment_method to the AS Cash Disbursement Type picklist. */
-    private static String mapPayType(String paymentMethod) {
-        if (paymentMethod != null && paymentMethod.equalsIgnoreCase('CHECK')) return 'Check';
-        return 'Electronic';
+    /**
+     * @description Map the Ramp payment method to the AS Cash Disbursement Type
+     * picklist ('Check' | 'Electronic'; 'AS Pay' is never ours to set).
+     *
+     * A bill paid THROUGH Ramp reports the real rail in payment_method (ACH, CHECK,
+     * DOMESTIC_WIRE, …). A bill marked paid OUTSIDE of Ramp always reports the generic
+     * payment_method = 'PAID_MANUALLY' and carries the method the user actually chose
+     * in details.manual_payment_method (CHECK, CASH, NON_RAMP_CREDIT_CARD, …), so the
+     * nested value decides the type in that case — otherwise a manual check payment
+     * falls through to Electronic (FS-15104).
+     */
+    @TestVisible
+    private static String mapPayType(BillPayment payment) {
+        if (payment == null) return 'Electronic';
+        String method = payment.payment_method;
+        if (PAID_MANUALLY.equalsIgnoreCase(method) && payment.details != null) {
+            method = payment.details.manual_payment_method;
+        }
+        return (method != null && method.equalsIgnoreCase('CHECK')) ? 'Check' : 'Electronic';
     }
 
     private static AcctSeed__Account_Payable_Line__c buildLine(
