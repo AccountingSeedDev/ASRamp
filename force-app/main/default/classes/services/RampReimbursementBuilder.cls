@@ -15,6 +15,7 @@ public with sharing class RampReimbursementBuilder {
     private static final String PAYABLE_STATUS = 'In Process';
     private static final Set<String> SKIP_TYPES = new Set<String>{ 'PAYBACK_FULL', 'PAYBACK_PARTIAL' };
     private static final String PAID_STATE = 'REIMBURSED';
+    private static final String PERIOD_STATUS_OPEN = 'Open';
 
     // --------------------------------------------------------------------
     //  DTOs — GET /developer/v1/reimbursements (Reimbursement resource)
@@ -119,7 +120,7 @@ public with sharing class RampReimbursementBuilder {
         Id ledgerId = RampSyncSettingsService.getDefaultLedgerId();
         Id suspenseGLId = RampSyncSettingsService.getSuspenseGLId();
         Id bankGLId = RampSyncSettingsService.getBillPaymentBankGLIdOrNull();
-        Map<Date, Id> periodByDate = resolvePeriods(reimbursements);
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = resolvePeriods(reimbursements);
 
         for (Reimbursement r : reimbursements) {
             // Skip paybacks / employee-owes-business.
@@ -138,7 +139,8 @@ public with sharing class RampReimbursementBuilder {
 
     private static ReimbursementBuild buildOne(
         Reimbursement r, Map<String, Id> employeeByRampUserId, Map<String, Id> glByUuid,
-        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Map<Date, Id> periodByDate,
+        Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate,
         Id ledgerId, Id suspenseGLId, Id bankGLId
     ) {
         if (String.isBlank(r.id)) throw new BuildException('Reimbursement missing id');
@@ -150,10 +152,14 @@ public with sharing class RampReimbursementBuilder {
 
         Date txnDate = parseDate(r.transaction_date != null ? r.transaction_date : r.accounting_date);
         if (txnDate == null) throw new BuildException('Could not parse a usable date from transaction_date/accounting_date');
-        Id periodId = periodByDate.get(txnDate);
-        if (periodId == null) {
+        AcctSeed__Accounting_Period__c period = periodByDate.get(txnDate);
+        if (period == null) {
             throw new BuildException('No Accounting Period in Accounting Seed covers date ' + String.valueOf(txnDate) + '.');
         }
+        if (period.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+            throw new BuildException(closedPeriodMessage(period.Name, txnDate, 'transaction_date'));
+        }
+        Id periodId = period.Id;
 
         ReimbursementBuild rb = new ReimbursementBuild();
         rb.reimbursementId = r.id;
@@ -175,11 +181,11 @@ public with sharing class RampReimbursementBuilder {
                 ReimbLineItem li = r.line_items[i];
                 Decimal amt = (li.amount != null) ? li.amount.toDecimal() : null;
                 if (amt == null) throw new BuildException('Line item ' + i + ' has no amount');
-                rb.lines.add(buildLine(r, li.accounting_field_selections, amt, li.memo, i, glByUuid, varByUuid, suspenseGLId));
+                rb.lines.add(buildLine(r, li.accounting_field_selections, amt, li.memo, i, txnDate, glByUuid, varByUuid, suspenseGLId));
             }
         } else {
             if (r.amount == null) throw new BuildException('Reimbursement has no amount and no line items');
-            rb.lines.add(buildLine(r, r.accounting_field_selections, r.amount, r.memo, 0, glByUuid, varByUuid, suspenseGLId));
+            rb.lines.add(buildLine(r, r.accounting_field_selections, r.amount, r.memo, 0, txnDate, glByUuid, varByUuid, suspenseGLId));
         }
 
         // Reimbursed → Ramp already paid the employee: clear the payable.
@@ -189,7 +195,13 @@ public with sharing class RampReimbursementBuilder {
             for (AcctSeed__Account_Payable_Line__c ln : rb.lines) total += ln.AcctSeed__Amount__c;
             Date payDate = parseDate(r.payment_processed_at);
             if (payDate == null) payDate = txnDate;
-            Id payPeriod = periodByDate.get(payDate);
+            AcctSeed__Accounting_Period__c payPeriodRec = periodByDate.get(payDate);
+            // A closed payment period fails the whole reimbursement rather than silently
+            // dropping the disbursement, which would leave the payable looking unpaid.
+            if (payPeriodRec != null && payPeriodRec.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+                throw new BuildException(closedPeriodMessage(payPeriodRec.Name, payDate, 'payment_processed_at date'));
+            }
+            Id payPeriod = (payPeriodRec != null) ? payPeriodRec.Id : null;
             if (payPeriod != null) {
                 AcctSeed__Cash_Disbursement__c cd = new AcctSeed__Cash_Disbursement__c();
                 cd.AcctSeed__ExtId__c = r.id + ':cd';
@@ -219,13 +231,14 @@ public with sharing class RampReimbursementBuilder {
     }
 
     private static AcctSeed__Account_Payable_Line__c buildLine(
-        Reimbursement r, List<ReimbFieldSelection> lineSelections, Decimal amount, String memo, Integer ordinal,
+        Reimbursement r, List<ReimbFieldSelection> lineSelections, Decimal amount, String memo, Integer ordinal, Date txnDate,
         Map<String, Id> glByUuid, Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Id suspenseGLId
     ) {
         AcctSeed__Account_Payable_Line__c line = new AcctSeed__Account_Payable_Line__c();
         line.AcctSeed__ExtId__c = r.id + ':L' + ordinal;
         line.AcctSeed__Description__c = String.isNotBlank(memo) ? memo : r.memo;
         line.AcctSeed__Amount__c = amount;
+        line.AcctSeed__Date__c = txnDate;
 
         String glUuid = findSelectionId(lineSelections, 'GL_ACCOUNT');
         if (String.isBlank(glUuid)) glUuid = findSelectionId(r.accounting_field_selections, 'GL_ACCOUNT');
@@ -248,13 +261,42 @@ public with sharing class RampReimbursementBuilder {
             List<ReimbFieldSelection> selections, Map<String, AcctSeed__Accounting_Variable__c> varByUuid) {
         if (selections == null) return;
         for (ReimbFieldSelection sel : selections) {
-            if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
-            String t = varByUuid.get(sel.id).AcctSeed__Type__c;
-            if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = varByUuid.get(sel.id).Id;
-            else if (t == 'GL Account Variable 2' && line.AcctSeed__GL_Account_Variable_2__c == null) line.AcctSeed__GL_Account_Variable_2__c = varByUuid.get(sel.id).Id;
-            else if (t == 'GL Account Variable 3' && line.AcctSeed__GL_Account_Variable_3__c == null) line.AcctSeed__GL_Account_Variable_3__c = varByUuid.get(sel.id).Id;
-            else if (t == 'GL Account Variable 4' && line.AcctSeed__GL_Account_Variable_4__c == null) line.AcctSeed__GL_Account_Variable_4__c = varByUuid.get(sel.id).Id;
+            if (String.isBlank(sel.id)) continue;
+            // GL Account selections are resolved separately in buildLine — skip them here.
+            String selType = (sel.category_info != null) ? sel.category_info.type : null;
+            if (selType == 'GL_ACCOUNT') continue;
+
+            AcctSeed__Accounting_Variable__c v = varByUuid.get(sel.id);
+            String selLabel = (sel.name != null ? sel.name : sel.id);
+            if (v == null) {
+                // No live Accounting Variable maps to this option. Only fail when the
+                // option belongs to one of our synced "GL Account Variable 1-4" fields
+                // (a variable deleted in Accounting Seed but still selectable in Ramp).
+                // Other Ramp field types (subsidiary, project, customer-native fields)
+                // don't map to Accounting Variables and are legitimately ignored.
+                if (isGLVariableField(sel)) {
+                    throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id + ') no longer exists in Accounting Seed (it was deleted) and cannot be used for coding.');
+                }
+                continue;
+            }
+            if (!v.AcctSeed__Active__c) {
+                throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id + ') is inactive in Accounting Seed and cannot be used for coding.');
+            }
+            String t = v.AcctSeed__Type__c;
+            if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = v.Id;
+            else if (t == 'GL Account Variable 2' && line.AcctSeed__GL_Account_Variable_2__c == null) line.AcctSeed__GL_Account_Variable_2__c = v.Id;
+            else if (t == 'GL Account Variable 3' && line.AcctSeed__GL_Account_Variable_3__c == null) line.AcctSeed__GL_Account_Variable_3__c = v.Id;
+            else if (t == 'GL Account Variable 4' && line.AcctSeed__GL_Account_Variable_4__c == null) line.AcctSeed__GL_Account_Variable_4__c = v.Id;
         }
+    }
+
+    // A selection belongs to one of the GL Account Variable fields ASRamp creates in
+    // Ramp (named 'GL Account Variable 1'-'4' — see RampAccountingFieldService). The
+    // parent field is carried on category_info, so a coded option whose field is one
+    // of ours but which no longer resolves means the variable was deleted.
+    private static Boolean isGLVariableField(ReimbFieldSelection sel) {
+        String fieldName = (sel.category_info != null) ? sel.category_info.name : null;
+        return fieldName != null && fieldName.startsWith('GL Account Variable');
     }
 
     private static void collectUuids(List<ReimbFieldSelection> sels, Set<String> glUuids, Set<String> varUuids) {
@@ -287,14 +329,20 @@ public with sharing class RampReimbursementBuilder {
     private static Map<String, AcctSeed__Accounting_Variable__c> resolveVariables(Set<String> uuids) {
         Map<String, AcctSeed__Accounting_Variable__c> result = new Map<String, AcctSeed__Accounting_Variable__c>();
         if (uuids.isEmpty()) return result;
-        for (AcctSeed__Accounting_Variable__c v : [SELECT Id, AcctSeed__Type__c, Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c WHERE Ramp_Field_Option_Id__c IN :uuids AND AcctSeed__Active__c = true]) {
+        for (AcctSeed__Accounting_Variable__c v : [SELECT Id, AcctSeed__Type__c, AcctSeed__Active__c, Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c WHERE Ramp_Field_Option_Id__c IN :uuids]) {
             result.put(v.Ramp_Field_Option_Id__c, v);
         }
         return result;
     }
 
-    private static Map<Date, Id> resolvePeriods(List<Reimbursement> reimbursements) {
-        Map<Date, Id> periodByDate = new Map<Date, Id>();
+    /**
+     * @description Date -> covering Accounting Period. Returns the period record (not
+     * just its Id) so callers can reject a Closed period with a message naming it —
+     * Accounting Seed only blocks closed periods at post time, and the records we
+     * build are non-posted, so an unchecked Closed period strands them (FS-15065).
+     */
+    private static Map<Date, AcctSeed__Accounting_Period__c> resolvePeriods(List<Reimbursement> reimbursements) {
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = new Map<Date, AcctSeed__Accounting_Period__c>();
         Set<Date> allDates = new Set<Date>();
         for (Reimbursement r : reimbursements) {
             Date d = parseDate(r.transaction_date != null ? r.transaction_date : r.accounting_date);
@@ -306,12 +354,24 @@ public with sharing class RampReimbursementBuilder {
         Date minDate, maxDate;
         for (Date d : allDates) { if (minDate == null || d < minDate) minDate = d; if (maxDate == null || d > maxDate) maxDate = d; }
         for (AcctSeed__Accounting_Period__c p : [
-            SELECT Id, AcctSeed__Start_Date__c, AcctSeed__End_Date__c FROM AcctSeed__Accounting_Period__c
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
+            FROM AcctSeed__Accounting_Period__c
             WHERE AcctSeed__Start_Date__c <= :maxDate AND AcctSeed__End_Date__c >= :minDate
         ]) {
-            for (Date d : allDates) if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p.Id);
+            for (Date d : allDates) if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p);
         }
         return periodByDate;
+    }
+
+    /**
+     * @description Wording for a Closed-period failure (FS-15065). Names both the
+     * period and the date that landed in it, so the error queue entry is actionable
+     * without opening Ramp.
+     */
+    private static String closedPeriodMessage(String periodName, Date d, String dateFieldLabel) {
+        return 'Accounting Period ' + (String.isBlank(periodName) ? '(unnamed)' : periodName)
+            + ' covering date ' + String.valueOf(d) + ' is closed in Accounting Seed. '
+            + 'Reopen the period or adjust the ' + dateFieldLabel + ' in Ramp.';
     }
 
     private static Date parseDate(String isoOrDate) {

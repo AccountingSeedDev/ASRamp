@@ -40,6 +40,9 @@ export default class RampConfiguration extends LightningElement {
     @track transactionFailures = [];
     @track referenceLookupEnabled = false;
     @track referenceKeyTemplate = '';
+    // Saving overwrites the stored template with whatever this component holds, so a
+    // save is only safe once the current values have actually loaded (FS-15092).
+    @track referenceConfigLoaded = false;
 
     transactionFailureColumns = [
         { label: 'Ramp Txn Id', fieldName: 'rampTransactionId', type: 'text', initialWidth: 280 },
@@ -186,12 +189,31 @@ export default class RampConfiguration extends LightningElement {
         ];
     }
 
-    @wire(getReferenceLookupConfig)
-    wiredReferenceLookup({ data }) {
-        if (data) {
-            this.referenceLookupEnabled = data.enabled === true;
-            this.referenceKeyTemplate = data.template || '';
-        }
+    connectedCallback() {
+        this.loadReferenceLookupConfig();
+    }
+
+    loadReferenceLookupConfig() {
+        getReferenceLookupConfig()
+            .then(data => {
+                this.referenceLookupEnabled = data.enabled === true;
+                this.referenceKeyTemplate = data.template || '';
+                this.referenceConfigLoaded = true;
+            })
+            .catch(error => {
+                // Never fail silently here. An unloaded form still renders an empty
+                // template box, and saving from it would overwrite the stored
+                // template with '' — leaving the feature enabled but inert
+                // (FS-15092). Tell the user and block the save instead.
+                this.referenceConfigLoaded = false;
+                this.showToast(
+                    'Error',
+                    'Could not load the current Reference Lookup settings: ' +
+                        this.getErrorMessage(error) +
+                        ' Reload the page before saving.',
+                    'error'
+                );
+            });
     }
 
     handleReferenceEnabledChange(event) {
@@ -203,6 +225,24 @@ export default class RampConfiguration extends LightningElement {
     }
 
     handleSaveReferenceLookup() {
+        if (!this.referenceConfigLoaded) {
+            this.showToast(
+                'Error',
+                'The current Reference Lookup settings could not be loaded, so saving now would overwrite the stored template. Reload the page and try again.',
+                'error'
+            );
+            return;
+        }
+        // Mirrors the server-side guard so the user gets the feedback immediately:
+        // enabled with a blank template leaves the feature on but inert (FS-15092).
+        if (this.referenceLookupEnabled && !(this.referenceKeyTemplate || '').trim()) {
+            this.showToast(
+                'Error',
+                'Enter a Reference Key Template before enabling Reference Lookup. Without a template no key is computed and no reference row can match.',
+                'error'
+            );
+            return;
+        }
         this.isLoading = true;
         saveReferenceLookupConfig({ enabled: this.referenceLookupEnabled, template: this.referenceKeyTemplate })
             .then((result) => {

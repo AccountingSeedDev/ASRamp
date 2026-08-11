@@ -18,6 +18,8 @@
  */
 public with sharing class RampJournalEntryBuilder {
 
+    private static final String PERIOD_STATUS_OPEN = 'Open';
+
     // --------------------------------------------------------------------
     //  DTOs — match the Ramp Transaction OpenAPI response shape
     // --------------------------------------------------------------------
@@ -166,11 +168,15 @@ public with sharing class RampJournalEntryBuilder {
         Id suspenseGLId = RampSyncSettingsService.getSuspenseGLId();
         String defaultStatus = RampSyncSettingsService.getDefaultJEStatus();
 
-        // 3. Bulk-resolve Accounting Periods. AS enforces that every JE has a
-        // period and that period is open; we look the period up by date.
+        // 3. Bulk-resolve Accounting Periods. Every JE needs a period, and that
+        // period must be Open — Accounting Seed only enforces this at post time,
+        // and the JEs we build are "In Process", so a Closed period would sail
+        // through and strand the JE (FS-15065). Carry each period's status so
+        // buildTransactionLines can fail the transaction with a usable message.
         Map<Date, Id> periodByDate = new Map<Date, Id>();
         Map<Id, String> periodNameById = new Map<Id, String>();
         Map<Id, Date> periodEndById = new Map<Id, Date>();
+        Set<Id> closedPeriodIds = new Set<Id>();
         Set<Date> allDates = new Set<Date>();
         for (RampTransaction txn : transactions) {
             Date d = parseDate(txn.accounting_date != null ? txn.accounting_date : txn.user_transaction_time);
@@ -184,12 +190,13 @@ public with sharing class RampJournalEntryBuilder {
                 if (maxDate == null || d > maxDate) maxDate = d;
             }
             for (AcctSeed__Accounting_Period__c p : [
-                SELECT Id, Name, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
+                SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
                 FROM AcctSeed__Accounting_Period__c
                 WHERE AcctSeed__Start_Date__c <= :maxDate AND AcctSeed__End_Date__c >= :minDate
             ]) {
                 periodNameById.put(p.Id, p.Name);
                 periodEndById.put(p.Id, p.AcctSeed__End_Date__c);
+                if (p.AcctSeed__Status__c != PERIOD_STATUS_OPEN) closedPeriodIds.add(p.Id);
                 for (Date d : allDates) {
                     if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) {
                         periodByDate.put(d, p.Id);
@@ -223,6 +230,11 @@ public with sharing class RampJournalEntryBuilder {
                 result.failed.put(txn.id,
                     'No Accounting Period in Accounting Seed covers date ' + String.valueOf(txnDate) +
                     '. Open a period that includes this date or adjust the transaction accounting_date in Ramp.');
+                continue;
+            }
+            if (closedPeriodIds.contains(periodId)) {
+                result.failed.put(txn.id, closedPeriodMessage(periodNameById.get(periodId), txnDate,
+                    'transaction accounting_date'));
                 continue;
             }
 
@@ -376,11 +388,11 @@ public with sharing class RampJournalEntryBuilder {
         String userId = (txn.card_holder != null) ? txn.card_holder.user_id : null;
         String email = String.isNotBlank(userId) ? emailByRampUserId.get(userId) : null;
         Id empId = String.isNotBlank(email) ? employeeByEmail.get(email.toLowerCase()) : null;
-        if (String.isNotBlank(email)) {
-            for (AcctSeed__Journal_Entry_Line__c l : lines) {
-                l.Ramp_User_Email__c = email;
-                l.AcctSeed__Employee__c = empId;
-            }
+        // Assigned unconditionally (null included) so a cardholder that stops
+        // resolving clears the stale attribution instead of leaving it (FS-15092).
+        for (AcctSeed__Journal_Entry_Line__c l : lines) {
+            l.Ramp_User_Email__c = email;
+            l.AcctSeed__Employee__c = empId;
         }
 
         // Ramp transaction id on every line — a direct handle for
@@ -392,10 +404,11 @@ public with sharing class RampJournalEntryBuilder {
         // Reference Lookup: stamp the computed key on every line (tracing), then
         // apply matched-row defaults to expense (debit) lines only — never the
         // clearing line, whose GL/coding must stay the offset.
-        if (String.isNotBlank(refKey)) {
-            for (AcctSeed__Journal_Entry_Line__c l : lines) {
-                l.AcctSeed__Reference__c = refKey;
-            }
+        // Stamped unconditionally so turning the feature off (or clearing the
+        // template) clears the key from lines it previously stamped (FS-15092).
+        String refValue = String.isNotBlank(refKey) ? refKey : null;
+        for (AcctSeed__Journal_Entry_Line__c l : lines) {
+            l.AcctSeed__Reference__c = refValue;
         }
         if (refRow != null) {
             for (AcctSeed__Journal_Entry_Line__c l : lines) {
@@ -427,6 +440,21 @@ public with sharing class RampJournalEntryBuilder {
         line.AcctSeed__Date__c = txnDate; // the Ramp transaction's own date, not the header's
         line.AcctSeed__Description__c = String.isNotBlank(lineMemo) ? lineMemo : txn.memo;
         line.Ramp_Vendor_Name__c = txn.merchant_name;
+
+        // Blank every field that Ramp coding or the Reference Lookup can populate,
+        // so each field is present in the upsert even when nothing sets it. Lines are
+        // keyed by Ramp txn id and re-upserted on every run: a field left unassigned
+        // is simply absent from the DML, so a value applied by an earlier run would
+        // survive forever after the coding or the matching reference row went away
+        // (FS-15092). Assigning null makes each re-sync authoritative.
+        line.AcctSeed__Employee__c = null;
+        line.AcctSeed__GL_Account_Variable_1__c = null;
+        line.AcctSeed__GL_Account_Variable_2__c = null;
+        line.AcctSeed__GL_Account_Variable_3__c = null;
+        line.AcctSeed__GL_Account_Variable_4__c = null;
+        line.AcctSeed__Project__c = null;
+        line.AcctSeed__Project_Task__c = null;
+        line.AcctSeed__Product__c = null;
 
         // Vendor Account (may stay null — never required):
         //   1. Accounting Vendor coding (line-level, then transaction-level).
@@ -481,8 +509,26 @@ public with sharing class RampJournalEntryBuilder {
     ) {
         if (selections == null) return;
         for (AccountingFieldSelection sel : selections) {
-            if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
+            if (String.isBlank(sel.id)) continue;
             AcctSeed__Accounting_Variable__c var = varByUuid.get(sel.id);
+            if (var == null) {
+                // No live Accounting Variable maps to this option. Only fail when the
+                // option belongs to one of our synced "GL Account Variable 1-4" fields
+                // (a variable deleted in Accounting Seed but still selectable in Ramp).
+                // Other Ramp field types (subsidiary, project, customer-native fields)
+                // don't map to Accounting Variables and are legitimately ignored.
+                if (isGLVariableField(sel)) {
+                    String selLabel = (sel.name != null ? sel.name : sel.id);
+                    throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id
+                        + ') no longer exists in Accounting Seed (it was deleted) and cannot be used for coding.');
+                }
+                continue;
+            }
+            if (!var.AcctSeed__Active__c) {
+                String selLabel = (sel.name != null ? sel.name : sel.id);
+                throw new BuildException('GL Variable "' + selLabel + '" (option id: ' + sel.id
+                    + ') is inactive in Accounting Seed and cannot be used for coding.');
+            }
             // Variable's own AcctSeed__Type__c tells us which column (1-4)
             String varType = var.AcctSeed__Type__c;
             if (varType == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) {
@@ -495,6 +541,15 @@ public with sharing class RampJournalEntryBuilder {
                 line.AcctSeed__GL_Account_Variable_4__c = var.Id;
             }
         }
+    }
+
+    // A selection belongs to one of the GL Account Variable fields ASRamp creates in
+    // Ramp (named 'GL Account Variable 1'-'4' — see RampAccountingFieldService). The
+    // parent field is carried on category_info, so a coded option whose field is one
+    // of ours but which no longer resolves means the variable was deleted.
+    private static Boolean isGLVariableField(AccountingFieldSelection sel) {
+        String fieldName = (sel.category_info != null) ? sel.category_info.name : null;
+        return fieldName != null && fieldName.startsWith('GL Account Variable');
     }
 
     private static String findSelectionId(List<AccountingFieldSelection> selections, String type) {
@@ -871,10 +926,13 @@ public with sharing class RampJournalEntryBuilder {
     private static Map<String, AcctSeed__Accounting_Variable__c> resolveVariables(Set<String> uuids) {
         Map<String, AcctSeed__Accounting_Variable__c> result = new Map<String, AcctSeed__Accounting_Variable__c>();
         if (uuids.isEmpty()) return result;
+        // Include inactive variables so applyVariables can distinguish "inactive"
+        // from "deleted" and fail the record with an accurate message rather than
+        // syncing silently with a blank variable field.
         for (AcctSeed__Accounting_Variable__c var : [
-            SELECT Id, AcctSeed__Type__c, Ramp_Field_Option_Id__c
+            SELECT Id, AcctSeed__Type__c, AcctSeed__Active__c, Ramp_Field_Option_Id__c
             FROM AcctSeed__Accounting_Variable__c
-            WHERE Ramp_Field_Option_Id__c IN :uuids AND AcctSeed__Active__c = true
+            WHERE Ramp_Field_Option_Id__c IN :uuids
         ]) {
             result.put(var.Ramp_Field_Option_Id__c, var);
         }
@@ -884,6 +942,17 @@ public with sharing class RampJournalEntryBuilder {
     // --------------------------------------------------------------------
     //  Date parsing
     // --------------------------------------------------------------------
+
+    /**
+     * @description Wording for a Closed-period failure (FS-15065). Names both the
+     * period and the date that landed in it, so the error queue entry is actionable
+     * without opening Ramp.
+     */
+    private static String closedPeriodMessage(String periodName, Date d, String dateFieldLabel) {
+        return 'Accounting Period ' + (String.isBlank(periodName) ? '(unnamed)' : periodName)
+            + ' covering date ' + String.valueOf(d) + ' is closed in Accounting Seed. '
+            + 'Reopen the period or adjust the ' + dateFieldLabel + ' in Ramp.';
+    }
 
     private static Date parseDate(String isoOrDate) {
         if (String.isBlank(isoOrDate)) return null;

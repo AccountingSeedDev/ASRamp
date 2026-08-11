@@ -1,12 +1,12 @@
 {
   "packageDirectories": [
     {
-      "versionName": "ver 0.6.2",
-      "versionNumber": "0.6.2.NEXT",
+      "versionName": "ver 0.10.0",
+      "versionNumber": "0.10.0.NEXT",
       "path": "force-app",
       "default": true,
       "package": "ASRamp",
-      "versionDescription": "OAuth token request now retries once on a transient 5xx and surfaces a clean error (no raw HTML gateway page) instead of dumping Ramp's 502 page into the sync error queue. Builds on 0.6.1 (FS-14802/14804/14827/14799 fixes).",
+      "versionDescription": "Accounting Seed Ramp Integration",
       "ancestorVersion": "HIGHEST",
       "dependencies": [
         {
@@ -33,6 +33,10 @@
     "ASRamp@0.5.0-1": "04tRi000000tYNdIAM",
     "ASRamp@0.6.0-1": "04tRi000000tiq1IAA",
     "ASRamp@0.6.1-1": "04tRi000000umTNIAY",
-    "ASRamp@0.6.2-1": "04tRi000000un9JIAQ"
+    "ASRamp@0.6.2-1": "04tRi000000un9JIAQ",
+    "ASRamp@0.7.0-1": "04tRi000000vQVdIAM",
+    "ASRamp@0.8.0-1": "04tRi000000vYGHIA2",
+    "ASRamp@0.9.0-1": "04tRi000000yFk9IAE",
+    "ASRamp@0.10.0-1": "04tRi000000yPzdIAE"
   }
 }

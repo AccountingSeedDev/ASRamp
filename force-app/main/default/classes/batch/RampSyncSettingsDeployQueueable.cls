@@ -44,7 +44,9 @@ public class RampSyncSettingsDeployQueueable implements Queueable {
         Metadata.DeployContainer container = new Metadata.DeployContainer();
         container.addMetadata(md);
         if (!Test.isRunningTest()) {
-            Metadata.Operations.enqueueDeployment(container, null);
+            // A real callback, not null — otherwise a failed deploy is invisible and
+            // the UI has already reported the save as successful (FS-15092).
+            Metadata.Operations.enqueueDeployment(container, new RampMetadataDeployCallback());
         }
     }
 

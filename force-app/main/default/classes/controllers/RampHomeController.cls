@@ -144,15 +144,30 @@ public with sharing class RampHomeController {
                 d.syncedRecent += j.succeeded;
             }
 
+            AcctSeed__Automated_Job_Results__c glAjr = ajr.get(RampJobResultLogger.JOB_GL_SYNC);
+            Boolean hasEverSyncedGl = glAjr != null && (Integer) nzDec(glAjr.AcctSeed__Succeeded__c) > 0;
+            Boolean masterDone = glSynced > 0 || hasEverSyncedGl;
+
             // Live follow-up + pending across all pipelines.
-            d.failedTotal = nz(tx.get('failed')) + nz(bill.get('failed')) + nz(reimb.get('failed'));
+            //
+            // Per pipeline, take the greater of the live per-record count and the
+            // latest run's reported failures. Build failures never persist a record,
+            // so they exist only on the Automated Job Result; per-record counts can
+            // outlive a run because they include unresolved failures from earlier
+            // runs. max() covers both without double-counting a record that appears
+            // in each. Without this the banner reads "All active pipelines healthy"
+            // while the error queue below it lists failures (FS-15031).
+            d.failedTotal =
+                  Math.max(nz(tx.get('failed')),    ajrFailed(ajr, RampJobResultLogger.JOB_CARD_SYNC))
+                + Math.max(nz(bill.get('failed')),  ajrFailed(ajr, RampJobResultLogger.JOB_BILL_SYNC))
+                + Math.max(nz(reimb.get('failed')), ajrFailed(ajr, RampJobResultLogger.JOB_REIMBURSEMENT_SYNC));
             d.pendingTotal = nz(tx.get('pending')) + nz(bill.get('pending')) + nz(reimb.get('pending'));
 
             d.settings = buildSettings();
             Boolean settingsSet = false;
             for (Setting s : d.settings) { if (s.label == 'Default ledger') settingsSet = s.isSet; }
 
-            d.steps = buildSteps(d.connected, d.accountingConfigured, glTotal, glPending, settingsSet, nz(tx.get('total')));
+            d.steps = buildSteps(d.connected, d.accountingConfigured, masterDone, settingsSet, nz(tx.get('total')));
             Integer doneCount = 0;
             for (Step s : d.steps) { if (s.done) doneCount++; }
             d.donePct = d.steps.isEmpty() ? 0 : (Integer) Math.round(100.0 * doneCount / d.steps.size());
@@ -173,7 +188,22 @@ public with sharing class RampHomeController {
                 }
             }
 
+            // Master-group failures (vendors / GL accounts / variables) are reported
+            // per job run rather than per record, so they have no live tally at all
+            // (FS-15026).
+            d.failedTotal += ajrFailed(ajr, RampJobResultLogger.JOB_GL_SYNC)
+                           + ajrFailed(ajr, RampJobResultLogger.JOB_FIELD_OPTIONS_SYNC)
+                           + ajrFailed(ajr, RampJobResultLogger.JOB_VENDOR_SYNC);
+
             d.failures = recentFailures(ajr);
+
+            // Invariant: the health banner must never read "healthy" while the error
+            // queue below it has rows. A hard page failure logs every count at zero
+            // with the reason in Notes, so it contributes nothing above.
+            if (d.failedTotal == 0 && !d.failures.isEmpty()) {
+                d.failedTotal = d.failures.size();
+            }
+
             return d;
         } catch (Exception e) {
             throw new AuraHandledException('Error loading Ramp home: ' + e.getMessage());
@@ -491,11 +521,11 @@ public with sharing class RampHomeController {
 
     // ───────────────────────── steps ─────────────────────────
     private static List<Step> buildSteps(Boolean connected, Boolean acctConfigured,
-            Integer glTotal, Integer glPending, Boolean settingsSet, Integer txTotal) {
+            Boolean masterDone, Boolean settingsSet, Integer txTotal) {
         List<Step> steps = new List<Step>();
         steps.add(step('connect',  'Connect to Ramp',           'Authorize with your Ramp OAuth client ID and secret.', connected));
         steps.add(step('acctconn', 'Establish accounting link', 'Open the accounting connection so Ramp can exchange data.', acctConfigured));
-        steps.add(step('master',   'Map master data',           'Sync GL accounts and accounting variables to Ramp.', glTotal > 0 && glPending == 0));
+        steps.add(step('master',   'Map master data',           'Sync GL accounts and accounting variables to Ramp.', masterDone));
         steps.add(step('settings', 'Configure sync settings',   'Set the clearing GL, ledger and JE status.', settingsSet));
         steps.add(step('firstrun', 'Run your first sync',        'Pull ready records from Ramp into Accounting Seed.', txTotal > 0));
         Boolean markedCurrent = false;
@@ -640,10 +670,64 @@ public with sharing class RampHomeController {
                 isReimb ? 'reimb' : 'bill', isReimb ? 'syncReimb' : 'syncBill', ap.AcctSeed__Date__c, ap.Ramp_Sync_Error__c, true));
         }
 
+        // ── Reimbursement build/header failures: no payable record is created for
+        // these, so always surface the AJR entry when failures are reported.
+        // Build failures and DML failures are separate failure modes — the AJR
+        // entry is always shown alongside any per-record rows (no suppression). ──
+        AcctSeed__Automated_Job_Results__c reimbAjr = ajr.get(RampJobResultLogger.JOB_REIMBURSEMENT_SYNC);
+        if (reimbAjr != null && (Integer) nzDec(reimbAjr.AcctSeed__Failed__c) > 0) {
+            String reimbNotes = String.isNotBlank(reimbAjr.AcctSeed__Notes__c)
+                ? reimbAjr.AcctSeed__Notes__c
+                : 'Reimbursement sync failed (' + (Integer) nzDec(reimbAjr.AcctSeed__Failed__c) + ' error(s))';
+            rows.add(failure('transaction', reimbAjr.Id, 'Reimbursement sync', null,
+                'Reimbursement Payable', 'reimb', 'syncReimb',
+                reimbAjr.CreatedDate.date(), reimbNotes, true));
+        }
+
+        AcctSeed__Automated_Job_Results__c billAjr = ajr.get(RampJobResultLogger.JOB_BILL_SYNC);
+        if (billAjr != null && (Integer) nzDec(billAjr.AcctSeed__Failed__c) > 0) {
+            String billNotes = String.isNotBlank(billAjr.AcctSeed__Notes__c)
+                ? billAjr.AcctSeed__Notes__c
+                : 'Bill sync failed (' + (Integer) nzDec(billAjr.AcctSeed__Failed__c) + ' error(s))';
+            rows.add(failure('transaction', billAjr.Id, 'Bill sync', null,
+                'Vendor Payable', 'bill', 'syncBill',
+                billAjr.CreatedDate.date(), billNotes, true));
+        }
+
+        // ── Card build failures: a transaction that fails to build (unresolved GL,
+        // no open period, no amount) never persists a Journal Entry, so there is no
+        // per-record row above to find. Without this the AJR reports N failed while
+        // the queue sits empty — the reported FS-15031 symptom.
+        //
+        // A hard page failure is also surfaced: when syncPage() throws, the run is
+        // logged with all counts at zero and the reason only in Notes, so keying
+        // solely on Failed__c would miss it. ──
+        AcctSeed__Automated_Job_Results__c cardAjr = ajr.get(RampJobResultLogger.JOB_CARD_SYNC);
+        if (cardAjr != null) {
+            Integer cardFailed = (Integer) nzDec(cardAjr.AcctSeed__Failed__c);
+            Boolean hardPageFailure = cardFailed == 0
+                && (Integer) nzDec(cardAjr.AcctSeed__Processed__c) == 0
+                && String.isNotBlank(cardAjr.AcctSeed__Notes__c);
+            if (cardFailed > 0 || hardPageFailure) {
+                String cardNotes = String.isNotBlank(cardAjr.AcctSeed__Notes__c)
+                    ? cardAjr.AcctSeed__Notes__c
+                    : 'Card transaction sync failed (' + cardFailed + ' error(s))';
+                rows.add(failure('transaction', cardAjr.Id, 'Card transaction sync', null,
+                    'Journal Entry', 'txn', 'syncTxn',
+                    cardAjr.CreatedDate.date(), cardNotes, true));
+            }
+        }
+
         // ── Master group: no per-record error fields, so surface the latest run's
         // Automated Job Result when it reported failures (reason = AJR notes). ──
         rows.addAll(masterFailures(ajr));
         return rows;
+    }
+
+    /** Failure count reported by a job type's most recent run, or 0 if it never ran. */
+    private static Integer ajrFailed(Map<String, AcctSeed__Automated_Job_Results__c> ajr, String jobType) {
+        AcctSeed__Automated_Job_Results__c r = ajr.get(jobType);
+        return r == null ? 0 : (Integer) nzDec(r.AcctSeed__Failed__c);
     }
 
     private static List<Failure> masterFailures(Map<String, AcctSeed__Automated_Job_Results__c> ajr) {

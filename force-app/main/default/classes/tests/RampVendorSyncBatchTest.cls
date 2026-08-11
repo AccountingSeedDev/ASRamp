@@ -48,6 +48,14 @@ private class RampVendorSyncBatchTest {
             AcctSeed__Accounting_Type__c = 'Customer'
         ));
 
+        // Vendor with a Ramp ID but NO AccountNumber — the PATCH bucket case that
+        // regressed to sending "code": null (HTTP 422 from Ramp).
+        accounts.add(new Account(
+            Name = 'Test Vendor No Code',
+            AcctSeed__Accounting_Type__c = 'Vendor',
+            Ramp_Vendor_Id__c = 'existing-ramp-id-no-code'
+        ));
+
         // Insert as the admin so the Ramp_Vendor_Id__c write is permitted.
         System.runAs(TestDataFactory.getInstance().getAdminUser()) {
             insert accounts;
@@ -178,6 +186,77 @@ private class RampVendorSyncBatchTest {
     }
 
     @IsTest
+    static void testUpdateVendor_blankAccountNumberSendsEmptyStringNotNull() {
+        // Ramp types `code` as a non-nullable string and resets it on an empty
+        // string. Sending null returned 422 "Field may not be null." for every
+        // vendor with a blank AccountNumber (FS-15026).
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            Test.startTest();
+            Test.setMock(HttpCalloutMock.class, new RampVendorMockCapturePatch());
+
+            RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
+            Database.executeBatch(batch, 200); // one chunk = every vendor PATCHed together
+
+            Test.stopTest();
+        }
+
+        System.assert(!patchBodies.isEmpty(), 'The batch should have issued at least one PATCH');
+
+        Boolean sawBlankCodeVendor = false;
+        for (String body : patchBodies) {
+            System.assert(!body.contains('"code":null'),
+                'code must never be serialized as null — Ramp rejects it with 422: ' + body);
+
+            Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(body);
+            if ('Test Vendor No Code'.equals(parsed.get('name'))) {
+                sawBlankCodeVendor = true;
+                System.assertEquals('', parsed.get('code'),
+                    'A blank AccountNumber must reset the Ramp code via an empty string');
+            }
+            if ('Test Vendor 3'.equals(parsed.get('name'))) {
+                System.assertEquals('V003', parsed.get('code'),
+                    'A populated AccountNumber must still be sent through unchanged');
+            }
+        }
+        System.assert(sawBlankCodeVendor, 'The blank-AccountNumber vendor should have been PATCHed');
+    }
+
+    @IsTest
+    static void testRestoreUpdate_partialSuccessIsolatesTheFailingRow() {
+        // A single Account tripping an org validation rule (the customer's
+        // "Country is required" on BillingCountry) must not discard the rest of
+        // the chunk — those vendors would otherwise never be stamped and would
+        // fail again on every subsequent run.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            Account good = [SELECT Id, Name, Ramp_Vendor_Id__c FROM Account WHERE Name = 'Test Vendor 1' LIMIT 1];
+            good.Ramp_Vendor_Id__c = 'restored-ramp-id';
+
+            // A well-formed Id that points at no row fails this one record only.
+            Account doomed = new Account(
+                Id = TestDataFactory.generateFakeId(Account.SObjectType),
+                Name = 'Doomed Vendor',
+                Ramp_Vendor_Id__c = 'never-saved'
+            );
+
+            RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
+
+            Test.startTest();
+            Integer saved = batch.updateAllowingPartialSuccess(new List<Account>{ good, doomed }, 'Restore');
+            Test.stopTest();
+
+            System.assertEquals(1, saved, 'The healthy row must still save alongside a failing sibling');
+            System.assertEquals(1, batch.errorCount, 'Only the failing row counts as an error');
+            System.assertEquals(1, batch.errors.size(), 'One error message per failed row');
+            System.assert(batch.errors[0].startsWith('Restore Doomed Vendor:'),
+                'Error should name the context and the offending record: ' + batch.errors[0]);
+
+            Account reloaded = [SELECT Ramp_Vendor_Id__c FROM Account WHERE Id = :good.Id];
+            System.assertEquals('restored-ramp-id', reloaded.Ramp_Vendor_Id__c,
+                'The healthy row must be committed, not rolled back with the failing one');
+        }
+    }
+
+    @IsTest
     static void testExtractErrorDetail_Html404() {
         HTTPResponse res = new HTTPResponse();
         res.setStatusCode(404);
@@ -204,6 +283,40 @@ private class RampVendorSyncBatchTest {
         res.setBody('{"error":"invalid_request","message":"Missing required field"}');
         String detail = RampVendorSyncBatch.extractErrorDetail(res);
         System.assertEquals('invalid_request', detail, 'Should extract error field from JSON');
+    }
+
+    /**
+     * @description Records every PATCH body so the test can assert on the exact
+     * JSON sent to Ramp. GET returns no existing vendors so the null-Ramp-Id
+     * Accounts take the create path and only the PATCH bucket is exercised.
+     */
+    private static List<String> patchBodies = new List<String>();
+
+    private class RampVendorMockCapturePatch implements HttpCalloutMock {
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000}');
+                return res;
+            }
+            if (req.getMethod() == 'PATCH') {
+                patchBodies.add(req.getBody());
+                res.setStatusCode(200);
+                res.setBody('{"ramp_id":"unchanged"}');
+                return res;
+            }
+            if (req.getMethod() == 'POST') {
+                res.setStatusCode(201);
+                res.setBody('{"data":[]}');
+                return res;
+            }
+            res.setStatusCode(200);
+            res.setBody('{"data":[],"page":{"next":null}}');
+            return res;
+        }
     }
 
     /**

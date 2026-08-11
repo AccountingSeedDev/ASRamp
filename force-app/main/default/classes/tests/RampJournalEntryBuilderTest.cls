@@ -107,6 +107,27 @@ private class RampJournalEntryBuilderTest {
         return periods.isEmpty() ? Date.today() : periods[0].AcctSeed__Start_Date__c;
     }
 
+    /**
+     * @description Close an Accounting Period and return it, so a test can assert the
+     * builder rejects records dated into it (FS-15065). Accounting Seed refuses to
+     * close a period while an earlier one is still open, so this closes the EARLIEST
+     * period — callers should date their transaction inside it.
+     */
+    private static AcctSeed__Accounting_Period__c closeEarliestPeriod() {
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        AcctSeed__Accounting_Period__c period = [
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c
+            FROM AcctSeed__Accounting_Period__c
+            ORDER BY AcctSeed__Start_Date__c ASC
+            LIMIT 1
+        ];
+        System.runAs(admin) {
+            period.AcctSeed__Status__c = 'Closed';
+            update period;
+        }
+        return period;
+    }
+
     private static RampJournalEntryBuilder.RampTransaction sampleTransaction(String id, Decimal amount, String glUuid) {
         return sampleTransactionOn(id, amount, glUuid, pickPeriodDate());
     }
@@ -362,6 +383,101 @@ private class RampJournalEntryBuilderTest {
     }
 
     @IsTest
+    static void build_deletedGLVariable_fails() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-del');
+        // No Accounting_Variable__c exists for this option id — simulates a variable
+        // deleted in Accounting Seed but still selectable under the Ramp field.
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-var-del', 100.0, 'gl-uuid-del');
+        RampJournalEntryBuilder.AccountingFieldSelection s = new RampJournalEntryBuilder.AccountingFieldSelection();
+        s.id = 'deleted-var-uuid-999';
+        s.name = 'Deleted Dept';
+        s.type = 'CUSTOM';
+        s.category_info = new RampJournalEntryBuilder.CategoryInfo();
+        s.category_info.name = 'GL Account Variable 1';
+        t.accounting_field_selections.add(s);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, result.successful.size(), 'Deleted variable should fail the transaction');
+        System.assertEquals(1, result.failed.size());
+        System.assert(result.failed.get('txn-var-del').contains('deleted'),
+            'Error should mention deletion: ' + result.failed.get('txn-var-del'));
+    }
+
+    @IsTest
+    static void build_inactiveGLVariable_fails() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-inact');
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        System.runAs(admin) {
+            insert new AcctSeed__Accounting_Variable__c(
+                Name = 'Inactive Dept',
+                AcctSeed__Type__c = 'GL Account Variable 1',
+                AcctSeed__Active__c = false,
+                Ramp_Field_Option_Id__c = 'inactive-var-uuid-1'
+            );
+        }
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-var-inact', 100.0, 'gl-uuid-inact');
+        RampJournalEntryBuilder.AccountingFieldSelection s = new RampJournalEntryBuilder.AccountingFieldSelection();
+        s.id = 'inactive-var-uuid-1';
+        s.name = 'Inactive Dept';
+        s.type = 'CUSTOM';
+        s.category_info = new RampJournalEntryBuilder.CategoryInfo();
+        s.category_info.name = 'GL Account Variable 1';
+        t.accounting_field_selections.add(s);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, result.successful.size(), 'Inactive variable should fail the transaction');
+        System.assertEquals(1, result.failed.size());
+        System.assert(result.failed.get('txn-var-inact').contains('inactive'),
+            'Error should say inactive, not deleted: ' + result.failed.get('txn-var-inact'));
+    }
+
+    @IsTest
+    static void build_unmappedNonVariableField_syncsWithoutFailure() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-uuid-sub');
+
+        // A Ramp-native field (Subsidiary) not synced by ASRamp: it has no matching
+        // Accounting Variable and must be ignored, not fail the transaction.
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-sub', 100.0, 'gl-uuid-sub');
+        RampJournalEntryBuilder.AccountingFieldSelection s = new RampJournalEntryBuilder.AccountingFieldSelection();
+        s.id = 'subsidiary-option-uuid-1';
+        s.name = 'West Division';
+        s.type = 'SUBSIDIARY';
+        s.category_info = new RampJournalEntryBuilder.CategoryInfo();
+        s.category_info.name = 'Subsidiary';
+        t.accounting_field_selections.add(s);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size(), 'Unmapped non-variable field must not fail the sync: ' + result.failed);
+        System.assertEquals(0, result.failed.size());
+    }
+
+    @IsTest
     static void build_unresolvedGLNoSuspense_failsTransaction() {
         TestDataFactory.getInstance();
         configureSettings('CardClearing-TEST', 'Ledger-TEST');
@@ -379,6 +495,86 @@ private class RampJournalEntryBuilderTest {
         System.assertEquals(0, result.successful.size());
         System.assertEquals(1, result.failed.size());
         System.assert(result.failed.get('txn-fail').contains('Could not resolve a GL Account'));
+    }
+
+    @IsTest
+    static void build_referenceLookupOff_blanksAttributionSoStaleValuesClear() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('ExpenseGL', 'gl-stale-1');
+
+        // Reference Lookup off (the default) — every field a matched row could have
+        // written must still be present on the built line, explicitly null, so the
+        // upsert clears whatever a previous reference-enabled run applied (FS-15092).
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-stale', 30.0, 'gl-stale-1');
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult res = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        AcctSeed__Journal_Entry_Line__c debit = res.successful[0].lines[0];
+        Map<String, Object> fields = debit.getPopulatedFieldsAsMap();
+        for (String f : new List<String>{
+            'AcctSeed__Project__c', 'AcctSeed__Project_Task__c', 'AcctSeed__Product__c',
+            'AcctSeed__Account__c', 'AcctSeed__Employee__c', 'AcctSeed__Reference__c',
+            'AcctSeed__GL_Account_Variable_1__c', 'AcctSeed__GL_Account_Variable_2__c',
+            'AcctSeed__GL_Account_Variable_3__c', 'AcctSeed__GL_Account_Variable_4__c'
+        }) {
+            System.assert(fields.containsKey(f),
+                f + ' must be assigned (even as null) so a re-sync clears a stale value');
+            System.assertEquals(null, fields.get(f), f + ' should be null when nothing sets it');
+        }
+    }
+
+    @IsTest
+    static void build_closedAccountingPeriod_failsTransaction() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        AcctSeed__GL_Account__c codedGL = createCodedGL('Expense-TEST', 'gl-uuid-closed');
+
+        // Close the period the transaction date falls into (FS-15065). Accounting
+        // Seed only blocks closed periods at post time, so without the builder's
+        // own check this transaction would sync into a closed period.
+        AcctSeed__Accounting_Period__c period = closeEarliestPeriod();
+        Date d = period.AcctSeed__Start_Date__c;
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransactionOn('txn-closed', 75.0, 'gl-uuid-closed', d);
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(0, result.successful.size(), 'No JE may be built into a closed period');
+        System.assertEquals(1, result.failed.size(), 'Transaction should be reported as failed');
+        String reason = result.failed.get('txn-closed');
+        System.assert(reason.contains('closed'), 'Error should say the period is closed: ' + reason);
+        System.assert(reason.contains(period.Name), 'Error should name the period: ' + reason);
+        System.assert(reason.contains(String.valueOf(d)), 'Error should name the date: ' + reason);
+    }
+
+    @IsTest
+    static void build_openAccountingPeriod_stillSucceeds() {
+        TestDataFactory.getInstance();
+        configureSettings('CardClearing-TEST', 'Ledger-TEST');
+        createCodedGL('Expense-TEST', 'gl-uuid-open');
+
+        RampJournalEntryBuilder.RampTransaction t = sampleTransaction('txn-open-period', 40.0, 'gl-uuid-open');
+
+        Test.startTest();
+        RampJournalEntryBuilder.BuildResult result = RampJournalEntryBuilder.build(
+            new List<RampJournalEntryBuilder.RampTransaction>{ t },
+            RampSyncSettingsService.GROUPING_DAILY
+        );
+        Test.stopTest();
+
+        System.assertEquals(1, result.successful.size(), 'Open period must still build: ' + result.failed);
+        System.assertEquals(0, result.failed.size(), 'Open period must not fail: ' + result.failed);
     }
 
     @IsTest

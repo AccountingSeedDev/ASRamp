@@ -77,7 +77,11 @@ public with sharing class RampReimbursementService {
             Map<Id, AcctSeed__Cash_Disbursement_Batch__c> batchByPeriod = new Map<Id, AcctSeed__Cash_Disbursement_Batch__c>();
             for (RampReimbursementBuilder.ReimbursementBuild rb : paid) {
                 if (!batchByPeriod.containsKey(rb.paymentPeriodId)) {
-                    batchByPeriod.put(rb.paymentPeriodId, new AcctSeed__Cash_Disbursement_Batch__c(AcctSeed__ExtId__c = BATCH_EXTID_PREFIX + rb.paymentPeriodId));
+                    String batchName = 'Ramp Reimbursement ' + String.valueOf(rb.cashDisbursement.AcctSeed__Disbursement_Date__c);
+                    batchByPeriod.put(rb.paymentPeriodId, new AcctSeed__Cash_Disbursement_Batch__c(
+                        Name = batchName,
+                        AcctSeed__ExtId__c = BATCH_EXTID_PREFIX + rb.paymentPeriodId
+                    ));
                 }
             }
             Database.upsert(batchByPeriod.values(), AcctSeed__Cash_Disbursement_Batch__c.AcctSeed__ExtId__c, false);
@@ -128,9 +132,29 @@ public with sharing class RampReimbursementService {
             } else {
                 okSyncs.add(ref(rb.reimbursementId, rb.header.Id));
                 payableIdsToFlip.add(rb.header.Id);
-                if (rb.cashDisbursement != null && rb.cashDisbursement.Id != null) cdIdsToFlip.add(rb.cashDisbursement.Id);
+                if (rb.cashDisbursement != null && rb.cashDisbursement.Id != null) {
+                    cdIdsToFlip.add(rb.cashDisbursement.Id);
+                } else if (rb.isPaid) {
+                    result.errorMessages.add(rb.reimbursementId + ': Payable created successfully, but Cash Disbursement was not created — "Ramp Bill Payment Bank" GL Account is not configured or the payment period is not open.');
+                }
             }
         }
+
+        // Mark DML-failed payables synchronously so the error queue can surface them.
+        List<AcctSeed__Account_Payable__c> toFail = new List<AcctSeed__Account_Payable__c>();
+        for (RampReimbursementBuilder.ReimbursementBuild rb : build.successful) {
+            if (rb.header.Id == null) continue;
+            String failReason = lineFailure.get(rb.reimbursementId);
+            if (failReason == null) failReason = cdFailure.get(rb.reimbursementId);
+            if (failReason != null) {
+                toFail.add(new AcctSeed__Account_Payable__c(
+                    Id = rb.header.Id,
+                    Ramp_Sync_Status__c = 'Failed',
+                    Ramp_Sync_Error__c = truncate(failReason, 1000)
+                ));
+            }
+        }
+        if (!toFail.isEmpty()) Database.update(toFail, false);
 
         if ((!okSyncs.isEmpty() || !failSyncs.isEmpty()) && RampSyncSettingsService.getSendSyncAck()) {
             postAckAsync(JSON.serialize(okSyncs), JSON.serialize(failSyncs),

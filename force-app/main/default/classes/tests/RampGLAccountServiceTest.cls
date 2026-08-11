@@ -7,8 +7,11 @@ private class RampGLAccountServiceTest {
     // No credential is packaged; inject a synthetic one for the callout path.
     static { RampAuthService.overrideCredential = RampAuthService.buildTestCredential(); }
 
+    // Captures the POST body from RampGLAccountCaptureMock (Apex forbids static members on inner classes).
+    static String capturedPostBody;
+
     @TestSetup
-    public static void setup() {
+    static void setup() {
         TestDataFactory.getInstance().initialize();
     }
 
@@ -189,11 +192,13 @@ private class RampGLAccountServiceTest {
             Test.setMock(HttpCalloutMock.class, new RampGLAccountMockSuccess());
 
             Test.startTest();
-            RampGLAccountService.syncGLAccountBatch(glAccounts);
+            Map<String, String> rampIds = RampGLAccountService.syncGLAccountBatch(glAccounts);
             Test.stopTest();
 
-            // Verify the method completed without exceptions
-            System.assert(glAccounts.size() > 0, 'Should have processed GL Accounts');
+            System.assert(!rampIds.isEmpty(), 'Should return non-empty ramp ID map');
+            for (AcctSeed__GL_Account__c gl : glAccounts) {
+                System.assert(rampIds.containsKey(gl.Id), 'Ramp ID map should contain SF Id: ' + gl.Id);
+            }
         }
     }
 
@@ -330,6 +335,95 @@ private class RampGLAccountServiceTest {
         }
     }
 
+    @IsTest
+    static void testSyncAllGLAccounts_InactiveOnRampNotDuplicated() {
+        // Verifies that inactive accounts already on Ramp are treated as synced
+        // (re-stamped locally) and are NOT re-POSTed, which would cause a 400.
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            List<AcctSeed__GL_Account__c> activeGLs = [
+                SELECT Id, Ramp_Id__c FROM AcctSeed__GL_Account__c
+                WHERE AcctSeed__Active__c = true
+            ];
+            System.assert(activeGLs.size() > 0, 'Need at least one active GL');
+            for (AcctSeed__GL_Account__c gl : activeGLs) gl.Ramp_Id__c = null;
+            update activeGLs;
+
+            // Mock: GET returns all GLs as inactive entries on Ramp; POST must never be called.
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountMockAllExistInactive(activeGLs));
+
+            Test.startTest();
+            String result = RampGLAccountService.syncAllGLAccounts();
+            Test.stopTest();
+
+            System.assert(result.contains('restored Ramp_Id__c'), 'Should report restoration: ' + result);
+            System.assert(!result.contains('created '), 'Should NOT create when inactive entries already exist: ' + result);
+
+            Integer stillNull = [
+                SELECT COUNT() FROM AcctSeed__GL_Account__c
+                WHERE AcctSeed__Active__c = true AND Ramp_Id__c = null
+            ];
+            System.assertEquals(0, stillNull, 'All GLs should be restamped from inactive Ramp entries');
+        }
+    }
+
+    @IsTest
+    static void testSyncAllGLAccounts_CodeIsId() {
+        // Verifies that the `code` field sent to Ramp is the 18-char SF ID, not the GL Account Name.
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            capturedPostBody = null;
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountCaptureMock());
+
+            Test.startTest();
+            RampGLAccountService.syncAllGLAccounts();
+            Test.stopTest();
+
+            String capturedBody = capturedPostBody;
+            System.assert(String.isNotBlank(capturedBody), 'POST body should have been captured');
+
+            Map<String, Object> reqMap = (Map<String, Object>) JSON.deserializeUntyped(capturedBody);
+            List<Object> sent = (List<Object>) reqMap.get('gl_accounts');
+            System.assert(sent != null && !sent.isEmpty(), 'gl_accounts should be in POST body');
+
+            for (Object o : sent) {
+                Map<String, Object> acct = (Map<String, Object>) o;
+                String sfId = (String) acct.get('id');
+                String code = (String) acct.get('code');
+                System.assertEquals(sfId, code, 'code should equal SF Id, not name: id=' + sfId + ' code=' + code);
+            }
+        }
+    }
+
+    @IsTest
+    static void testSyncGLAccountBatch_ParseFailurePropagates() {
+        // Verifies that a malformed POST response causes parseRampIds to surface a
+        // RampGLAccountException (wrapping the JSON parse error).
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            List<AcctSeed__GL_Account__c> glAccounts = [
+                SELECT Id, Name, AcctSeed__Type__c, AcctSeed__Active__c, Ramp_Id__c
+                FROM AcctSeed__GL_Account__c
+                WHERE AcctSeed__Active__c = true
+                LIMIT 1
+            ];
+
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountMockMalformedResponse());
+
+            Test.startTest();
+            try {
+                RampGLAccountService.syncGLAccountBatch(glAccounts);
+                System.assert(false, 'Expected RampGLAccountException');
+            } catch (RampGLAccountService.RampGLAccountException e) {
+                System.assert(e.getMessage().contains('Error in batch sync'), 'Exception message: ' + e.getMessage());
+            }
+            Test.stopTest();
+        }
+    }
+
     /**
      * @description Mock that fails the POST. The pre-flight GET still returns
      * empty so we reach the POST step where the failure occurs.
@@ -352,6 +446,277 @@ private class RampGLAccountServiceTest {
             // POST → 500
             res.setStatusCode(500);
             res.setBody('{"error": "Internal Server Error"}');
+            return res;
+        }
+    }
+
+    /**
+     * @description Mock for the inactive-entry path: GET returns every local GL as
+     * an inactive Ramp account (is_active: false). Any POST returns 500 — it
+     * should never be called when all accounts are already represented on Ramp.
+     */
+    private class RampGLAccountMockAllExistInactive implements HttpCalloutMock {
+        private List<AcctSeed__GL_Account__c> gls;
+        public RampGLAccountMockAllExistInactive(List<AcctSeed__GL_Account__c> gls) { this.gls = gls; }
+
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write"}');
+                return res;
+            }
+            if (req.getMethod() == 'GET' && req.getEndpoint().contains('/accounting/accounts')) {
+                List<Map<String, Object>> data = new List<Map<String, Object>>();
+                for (AcctSeed__GL_Account__c gl : gls) {
+                    data.add(new Map<String, Object>{
+                        'id' => gl.Id,
+                        'ramp_id' => 'ramp_uuid_inactive_' + gl.Id,
+                        'is_active' => false,
+                        'name' => 'mock'
+                    });
+                }
+                Map<String, Object> body = new Map<String, Object>{
+                    'data' => data,
+                    'page' => new Map<String, Object>{ 'next' => null }
+                };
+                res.setStatusCode(200);
+                res.setBody(JSON.serialize(body));
+                return res;
+            }
+            // POST should never be called when all entries are already on Ramp.
+            res.setStatusCode(500);
+            res.setBody('{"error": "POST should not have been called for inactive Ramp entries"}');
+            return res;
+        }
+    }
+
+    /**
+     * @description Recording mock that captures the last POST body so tests can
+     * inspect the exact payload sent to Ramp. GET returns empty so all local GLs
+     * flow through the create path.
+     */
+    private class RampGLAccountCaptureMock implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write"}');
+                return res;
+            }
+
+            if (req.getMethod() == 'GET' && req.getEndpoint().contains('/accounting/accounts')) {
+                res.setStatusCode(200);
+                res.setBody('{"data":[],"page":{"next":null}}');
+                return res;
+            }
+
+            // POST — capture the body, then echo back with ramp_ids so the service can write back.
+            capturedPostBody = req.getBody();
+            res.setStatusCode(200);
+            Map<String, Object> requestMap = (Map<String, Object>) JSON.deserializeUntyped(req.getBody());
+            List<Object> requestAccounts = (List<Object>) requestMap.get('gl_accounts');
+            List<Map<String, Object>> responseAccounts = new List<Map<String, Object>>();
+            for (Object obj : requestAccounts) {
+                Map<String, Object> account = (Map<String, Object>) obj;
+                responseAccounts.add(new Map<String, Object>{
+                    'id' => account.get('id'),
+                    'ramp_id' => 'ramp_' + account.get('id')
+                });
+            }
+            res.setBody(JSON.serialize(new Map<String, Object>{ 'gl_accounts' => responseAccounts }));
+            return res;
+        }
+    }
+
+    /**
+     * @description Mock that returns malformed JSON on POST to trigger a parse
+     * failure inside parseRampIds, which should be re-thrown as
+     * RampGLAccountException with the "Error in batch sync" prefix.
+     */
+    private class RampGLAccountMockMalformedResponse implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000}');
+                return res;
+            }
+            // POST returns invalid JSON to trigger parseRampIds failure.
+            res.setStatusCode(200);
+            res.setBody('not valid json {{{');
+            return res;
+        }
+    }
+
+    @IsTest
+    static void testSyncAllGLAccounts_AJRCreatedOnSuccess() {
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountMockSuccess());
+
+            Test.startTest();
+            String result = RampGLAccountService.syncAllGLAccounts();
+            Test.stopTest();
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Processed__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_GL_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'AJR should be created for every sync run');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c, 'No failures on clean success');
+            System.assert((Integer) ajrs[0].AcctSeed__Succeeded__c > 0, 'Succeeded count should be positive');
+        }
+    }
+
+    @IsTest
+    static void testSyncAllGLAccounts_PartialEcho_AJRCreated() {
+        // Verifies that when Ramp only echoes back a ramp_id for one record
+        // (the rest go to notStamped), the AJR is still created and
+        // reflects the partial failure in its failed count.
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            List<AcctSeed__GL_Account__c> activeGLs = [
+                SELECT Id FROM AcctSeed__GL_Account__c WHERE AcctSeed__Active__c = true
+            ];
+            System.assert(activeGLs.size() > 1, 'Need at least 2 active GL accounts for partial echo test');
+
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountMockPartialEcho());
+
+            Test.startTest();
+            String result = RampGLAccountService.syncAllGLAccounts();
+            Test.stopTest();
+
+            System.assert(result.contains('GL Account sync complete'), 'Should complete without throwing: ' + result);
+            System.assert(result.contains('WARNING'), 'Should warn about records with no ID echo: ' + result);
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_GL_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'AJR should be created even when some records have no echo');
+            System.assert((Integer) ajrs[0].AcctSeed__Failed__c > 0,
+                'AJR failed count should reflect records that could not be stamped');
+        }
+    }
+
+    @IsTest
+    static void testSyncAllGLAccounts_WriteBackFailure_AJRCreated() {
+        // Verifies the primary bug fix: when Database.update(toWriteBack, false)
+        // returns a failed SaveResult (ramp_id too long for the field), the AJR
+        // is still committed with Failed__c > 0 and the method does NOT throw.
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            // Use the over-length-ramp-id mock so all records enter toWriteBack
+            // (ramp_id present) but the Database.update fails (value > 255 chars).
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountMockOverLengthRampId());
+
+            Test.startTest();
+            String result = RampGLAccountService.syncAllGLAccounts();
+            Test.stopTest();
+
+            System.assert(result.contains('GL Account sync complete'), 'Should not throw on write-back failure: ' + result);
+            System.assert(result.contains('ERROR'), 'Summary should contain ERROR for write-back failures: ' + result);
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_GL_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'AJR must be committed even when write-back DML fails');
+            System.assert((Integer) ajrs[0].AcctSeed__Failed__c > 0,
+                'AJR Failed__c should reflect the write-back failures');
+            System.assert(String.isNotBlank(ajrs[0].AcctSeed__Notes__c), 'AJR Notes should contain error details');
+            System.assert(ajrs[0].AcctSeed__Notes__c.contains('Write-back errors'),
+                'AJR Notes should list the write-back errors: ' + ajrs[0].AcctSeed__Notes__c);
+        }
+    }
+
+    /**
+     * @description Mock that echoes back a ramp_id longer than 255 characters for
+     * every account. This forces Database.update(toWriteBack, false) to return
+     * failed SaveResults (field length violation) without throwing, exercising the
+     * writeBackFailed counting and AJR-always-committed paths.
+     */
+    private class RampGLAccountMockOverLengthRampId implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write"}');
+                return res;
+            }
+            if (req.getMethod() == 'GET' && req.getEndpoint().contains('/accounting/accounts')) {
+                res.setStatusCode(200);
+                res.setBody('{"data":[],"page":{"next":null}}');
+                return res;
+            }
+            // POST: echo back all accounts but with a ramp_id that is 256 chars
+            // (one over the Text(255) limit on Ramp_Id__c) so Database.update fails.
+            res.setStatusCode(200);
+            Map<String, Object> requestMap = (Map<String, Object>) JSON.deserializeUntyped(req.getBody());
+            List<Object> requestAccounts = (List<Object>) requestMap.get('gl_accounts');
+            String overLengthId = 'ramp_' + 'x'.repeat(251); // 5 + 251 = 256 chars
+            List<Map<String, Object>> responseAccounts = new List<Map<String, Object>>();
+            for (Object obj : requestAccounts) {
+                Map<String, Object> acct = (Map<String, Object>) obj;
+                responseAccounts.add(new Map<String, Object>{
+                    'id' => acct.get('id'),
+                    'ramp_id' => overLengthId
+                });
+            }
+            res.setBody(JSON.serialize(new Map<String, Object>{ 'gl_accounts' => responseAccounts }));
+            return res;
+        }
+    }
+
+    /**
+     * @description Mock for the partial-echo path: GET returns empty so all local
+     * GLs flow to the create path. POST echoes back a ramp_id for only the first
+     * account in the request; remaining accounts are absent from the response,
+     * which means allNewRampIds has no entry for them and they go to notStamped.
+     */
+    private class RampGLAccountMockPartialEcho implements HttpCalloutMock {
+        public HttpResponse respond(HttpRequest req) {
+            HttpResponse res = new HttpResponse();
+            res.setHeader('Content-Type', 'application/json');
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setStatusCode(200);
+                res.setBody('{"access_token":"test_token","token_type":"Bearer","expires_in":864000,"scope":"accounting:write"}');
+                return res;
+            }
+            if (req.getMethod() == 'GET' && req.getEndpoint().contains('/accounting/accounts')) {
+                res.setStatusCode(200);
+                res.setBody('{"data":[],"page":{"next":null}}');
+                return res;
+            }
+            // POST: return 200 but echo back only the first account with a ramp_id;
+            // remaining accounts are absent from the response → notStamped for those.
+            res.setStatusCode(200);
+            Map<String, Object> requestMap = (Map<String, Object>) JSON.deserializeUntyped(req.getBody());
+            List<Object> requestAccounts = (List<Object>) requestMap.get('gl_accounts');
+            List<Map<String, Object>> responseAccounts = new List<Map<String, Object>>();
+            if (!requestAccounts.isEmpty()) {
+                Map<String, Object> first = (Map<String, Object>) requestAccounts[0];
+                responseAccounts.add(new Map<String, Object>{
+                    'id' => first.get('id'),
+                    'ramp_id' => 'ramp_partial_' + first.get('id')
+                });
+            }
+            res.setBody(JSON.serialize(new Map<String, Object>{ 'gl_accounts' => responseAccounts }));
             return res;
         }
     }

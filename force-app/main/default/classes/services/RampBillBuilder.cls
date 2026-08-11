@@ -16,6 +16,22 @@ public with sharing class RampBillBuilder {
     // safe, non-posted state.
     private static final String PAYABLE_STATUS = 'In Process';
 
+    private static final String PERIOD_STATUS_OPEN = 'Open';
+
+    // Ramp's payment_method for a bill marked paid outside of Ramp. The method the
+    // user actually chose lives in payment.details.manual_payment_method.
+    private static final String PAID_MANUALLY = 'PAID_MANUALLY';
+
+    // CurrencyIsoCode only exists when Multi-Currency is enabled; put()'ing it in a
+    // single-currency org throws SObjectException and would fail the whole run.
+    private static final Boolean MULTI_CURRENCY = UserInfo.isMultiCurrencyOrganization();
+
+    // Ramp field options carry the Accounting Seed record Id in external_id (verified
+    // against live Ramp payloads). Merchant selections populate external_id too, with
+    // the Account prefix, so a dangling variable is only identifiable by key prefix.
+    private static final String VARIABLE_KEY_PREFIX =
+        AcctSeed__Accounting_Variable__c.SObjectType.getDescribe().getKeyPrefix();
+
     // --------------------------------------------------------------------
     //  DTOs — match GET /developer/v1/bills (Bill resource)
     // --------------------------------------------------------------------
@@ -73,6 +89,17 @@ public with sharing class RampBillBuilder {
         public String payment_method;
         public String payment_date;
         public String effective_date;
+        public PaymentDetails details;   // method-specific; carries the manual method
+    }
+
+    /**
+     * @description Method-specific payment detail (ApiPaymentDetailsResource). Only
+     * the manual-payment variant carries a field we need: when a bill is marked paid
+     * outside of Ramp, payment_method is the generic 'PAID_MANUALLY' and the method
+     * the user actually picked lands here.
+     */
+    public class PaymentDetails {
+        public String manual_payment_method;   // CHECK, CASH, NON_RAMP_CREDIT_CARD, …
     }
 
     public class CurrencyAmount {
@@ -125,6 +152,8 @@ public with sharing class RampBillBuilder {
         }
         Map<String, Id> glByUuid = resolveGLs(glUuids);
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid = resolveVariables(varUuids);
+        Set<String> unusableVarUuids = findInactiveVarUuids(varUuids, varByUuid.keySet());
+        unusableVarUuids.addAll(findDeletedVarUuids(bills, varByUuid.keySet()));
 
         // 2. Resolve vendors (auto-create) → native vendor id -> Account Id.
         List<BillVendor> vendors = new List<BillVendor>();
@@ -135,12 +164,12 @@ public with sharing class RampBillBuilder {
         Id ledgerId = RampSyncSettingsService.getDefaultLedgerId();
         Id suspenseGLId = RampSyncSettingsService.getSuspenseGLId();
         Id bankGLId = RampSyncSettingsService.getBillPaymentBankGLIdOrNull(); // null → skip payment build
-        Map<Date, Id> periodByDate = resolvePeriods(bills);
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = resolvePeriods(bills);
 
         // 4. Per-bill build.
         for (Bill b : bills) {
             try {
-                result.successful.add(buildOne(b, vendorByNativeId, glByUuid, varByUuid, periodByDate, ledgerId, suspenseGLId, bankGLId));
+                result.successful.add(buildOne(b, vendorByNativeId, glByUuid, varByUuid, unusableVarUuids, periodByDate, ledgerId, suspenseGLId, bankGLId));
             } catch (BuildException e) {
                 result.failed.put(b.id, e.getMessage());
             }
@@ -150,8 +179,8 @@ public with sharing class RampBillBuilder {
 
     private static PayableBuild buildOne(
         Bill b, Map<String, Id> vendorByNativeId, Map<String, Id> glByUuid,
-        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Map<Date, Id> periodByDate,
-        Id ledgerId, Id suspenseGLId, Id bankGLId
+        Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Set<String> unusableVarUuids,
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate, Id ledgerId, Id suspenseGLId, Id bankGLId
     ) {
         if (String.isBlank(b.id)) throw new BuildException('Bill missing id');
 
@@ -160,11 +189,15 @@ public with sharing class RampBillBuilder {
 
         Date billDate = parseDate(b.issued_at != null ? b.issued_at : b.accounting_date);
         if (billDate == null) throw new BuildException('Could not parse a usable date from issued_at/accounting_date');
-        Id periodId = periodByDate.get(billDate);
-        if (periodId == null) {
+        AcctSeed__Accounting_Period__c period = periodByDate.get(billDate);
+        if (period == null) {
             throw new BuildException('No Accounting Period in Accounting Seed covers date ' + String.valueOf(billDate)
                 + '. Open a period that includes this date or adjust the bill date in Ramp.');
         }
+        if (period.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+            throw new BuildException(closedPeriodMessage(period.Name, billDate, 'bill date'));
+        }
+        Id periodId = period.Id;
 
         PayableBuild pb = new PayableBuild();
         pb.billId = b.id;
@@ -180,6 +213,9 @@ public with sharing class RampBillBuilder {
         ap.AcctSeed__Payee_Reference__c = b.invoice_number;
         ap.Ramp_Entity_Id__c = b.entity_id;
         ap.Ramp_Sync_Status__c = 'Pending';
+        if (MULTI_CURRENCY && b.amount != null && String.isNotBlank(b.amount.currency_code)) {
+            ap.put('CurrencyIsoCode', b.amount.currency_code);
+        }
         pb.header = ap;
 
         // Lines: one per bill line_item; fall back to a single line from bill.amount.
@@ -188,12 +224,12 @@ public with sharing class RampBillBuilder {
                 BillLineItem li = b.line_items[i];
                 Decimal amt = (li.amount != null) ? li.amount.toDecimal() : null;
                 if (amt == null) throw new BuildException('Line item ' + i + ' has no amount');
-                pb.lines.add(buildLine(b, li.accounting_field_selections, amt, li.memo, i, glByUuid, varByUuid, suspenseGLId));
+                pb.lines.add(buildLine(b, li.accounting_field_selections, amt, li.memo, i, billDate, glByUuid, varByUuid, unusableVarUuids, suspenseGLId));
             }
         } else {
             Decimal amt = (b.amount != null) ? b.amount.toDecimal() : null;
             if (amt == null) throw new BuildException('Bill has no amount and no line items');
-            pb.lines.add(buildLine(b, b.accounting_field_selections, amt, b.memo, 0, glByUuid, varByUuid, suspenseGLId));
+            pb.lines.add(buildLine(b, b.accounting_field_selections, amt, b.memo, 0, billDate, glByUuid, varByUuid, unusableVarUuids, suspenseGLId));
         }
 
         // ---- Payment stage: paid bill → Cash Disbursement + AP Disbursement ----
@@ -205,7 +241,13 @@ public with sharing class RampBillBuilder {
                 (b.payment != null && b.payment.payment_date != null) ? b.payment.payment_date : b.paid_at
             );
             if (payDate == null) payDate = billDate; // fall back to the bill date
-            Id payPeriod = periodByDate.get(payDate);
+            AcctSeed__Accounting_Period__c payPeriodRec = periodByDate.get(payDate);
+            // A closed payment period fails the whole bill rather than silently
+            // dropping the disbursement, which would leave the payable looking unpaid.
+            if (payPeriodRec != null && payPeriodRec.AcctSeed__Status__c != PERIOD_STATUS_OPEN) {
+                throw new BuildException(closedPeriodMessage(payPeriodRec.Name, payDate, 'payment date'));
+            }
+            Id payPeriod = (payPeriodRec != null) ? payPeriodRec.Id : null;
             if (payAmt != null && payPeriod != null) {
                 AcctSeed__Cash_Disbursement__c cd = new AcctSeed__Cash_Disbursement__c();
                 cd.AcctSeed__ExtId__c = b.id + ':cd';
@@ -217,8 +259,11 @@ public with sharing class RampBillBuilder {
                 cd.AcctSeed__Bank_Account__c = bankGLId;
                 cd.AcctSeed__Source__c = 'Payable';
                 cd.AcctSeed__Status__c = 'In Process';
-                cd.AcctSeed__Type__c = mapPayType(b.payment != null ? b.payment.payment_method : null);
+                cd.AcctSeed__Type__c = mapPayType(b.payment);
                 cd.Ramp_Sync_Status__c = 'Pending';
+                if (MULTI_CURRENCY && b.amount != null && String.isNotBlank(b.amount.currency_code)) {
+                    cd.put('CurrencyIsoCode', b.amount.currency_code);
+                }
                 pb.cashDisbursement = cd;
 
                 AcctSeed__AP_Disbursement__c apd = new AcctSeed__AP_Disbursement__c();
@@ -234,18 +279,35 @@ public with sharing class RampBillBuilder {
         return pb;
     }
 
-    /** Map Ramp payment_method to the AS Cash Disbursement Type picklist. */
-    private static String mapPayType(String paymentMethod) {
-        if (paymentMethod == 'CHECK') return 'Check';
-        return 'Electronic';
+    /**
+     * @description Map the Ramp payment method to the AS Cash Disbursement Type
+     * picklist ('Check' | 'Electronic'; 'AS Pay' is never ours to set).
+     *
+     * A bill paid THROUGH Ramp reports the real rail in payment_method (ACH, CHECK,
+     * DOMESTIC_WIRE, …). A bill marked paid OUTSIDE of Ramp always reports the generic
+     * payment_method = 'PAID_MANUALLY' and carries the method the user actually chose
+     * in details.manual_payment_method (CHECK, CASH, NON_RAMP_CREDIT_CARD, …), so the
+     * nested value decides the type in that case — otherwise a manual check payment
+     * falls through to Electronic (FS-15104).
+     */
+    @TestVisible
+    private static String mapPayType(BillPayment payment) {
+        if (payment == null) return 'Electronic';
+        String method = payment.payment_method;
+        if (PAID_MANUALLY.equalsIgnoreCase(method) && payment.details != null) {
+            method = payment.details.manual_payment_method;
+        }
+        return (method != null && method.equalsIgnoreCase('CHECK')) ? 'Check' : 'Electronic';
     }
 
     private static AcctSeed__Account_Payable_Line__c buildLine(
         Bill b, List<BillFieldSelection> lineSelections, Decimal amount, String memo, Integer ordinal,
-        Map<String, Id> glByUuid, Map<String, AcctSeed__Accounting_Variable__c> varByUuid, Id suspenseGLId
+        Date billDate, Map<String, Id> glByUuid, Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+        Set<String> unusableVarUuids, Id suspenseGLId
     ) {
         AcctSeed__Account_Payable_Line__c line = new AcctSeed__Account_Payable_Line__c();
         line.AcctSeed__ExtId__c = b.id + ':L' + ordinal;
+        line.AcctSeed__Date__c = billDate;
         line.AcctSeed__Description__c = String.isNotBlank(memo) ? memo : b.memo;
         line.AcctSeed__Amount__c = amount;
 
@@ -261,15 +323,21 @@ public with sharing class RampBillBuilder {
                 + ' (line ' + ordinal + '). Code the bill in Ramp or set the "Ramp Suspense" default GL Account.');
         }
 
-        applyVariables(line, lineSelections, varByUuid);
-        applyVariables(line, b.accounting_field_selections, varByUuid);
+        applyVariables(line, lineSelections, varByUuid, unusableVarUuids);
+        applyVariables(line, b.accounting_field_selections, varByUuid, unusableVarUuids);
         return line;
     }
 
     private static void applyVariables(AcctSeed__Account_Payable_Line__c line,
-            List<BillFieldSelection> selections, Map<String, AcctSeed__Accounting_Variable__c> varByUuid) {
+            List<BillFieldSelection> selections, Map<String, AcctSeed__Accounting_Variable__c> varByUuid,
+            Set<String> unusableVarUuids) {
         if (selections == null) return;
         for (BillFieldSelection sel : selections) {
+            if (unusableVarUuids.contains(sel.id)) {
+                throw new BuildException('GL Variable "' + sel.name + '" (Ramp id=' + sel.id
+                    + ') is no longer available in Accounting Seed — it was deleted or deactivated.'
+                    + ' Restore it in Accounting Seed, or recode the bill in Ramp, before syncing.');
+            }
             if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
             String t = varByUuid.get(sel.id).AcctSeed__Type__c;
             if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = varByUuid.get(sel.id).Id;
@@ -325,8 +393,78 @@ public with sharing class RampBillBuilder {
         return result;
     }
 
-    private static Map<Date, Id> resolvePeriods(List<Bill> bills) {
-        Map<Date, Id> periodByDate = new Map<Date, Id>();
+    private static Set<String> findInactiveVarUuids(Set<String> requested, Set<String> activeUuids) {
+        if (requested.isEmpty()) return new Set<String>();
+        Set<String> known = new Set<String>();
+        for (AcctSeed__Accounting_Variable__c v : [
+            SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c
+            WHERE Ramp_Field_Option_Id__c IN :requested
+        ]) {
+            known.add(v.Ramp_Field_Option_Id__c);
+        }
+        Set<String> inactive = new Set<String>(known);
+        inactive.removeAll(activeUuids);
+        return inactive;
+    }
+
+    /**
+     * Ramp option ids whose Accounting Seed variable has been deleted. Deleting the
+     * variable never reaches Ramp — only deactivation is PATCHed across — so the option
+     * stays selectable and bills keep coding to it. The option carries the Accounting
+     * Seed record Id in external_id; merchant selections carry an Account Id there too,
+     * so candidates are narrowed by the Accounting Variable key prefix.
+     */
+    private static Set<String> findDeletedVarUuids(List<Bill> bills, Set<String> activeUuids) {
+        Set<String> result = new Set<String>();
+        if (String.isBlank(VARIABLE_KEY_PREFIX)) return result;
+
+        Map<Id, String> uuidByVariableId = new Map<Id, String>();
+        for (Bill b : bills) {
+            List<BillFieldSelection> selections = new List<BillFieldSelection>();
+            if (b.accounting_field_selections != null) selections.addAll(b.accounting_field_selections);
+            if (b.line_items != null) {
+                for (BillLineItem li : b.line_items) {
+                    if (li.accounting_field_selections != null) selections.addAll(li.accounting_field_selections);
+                }
+            }
+            for (BillFieldSelection sel : selections) {
+                if (String.isBlank(sel.id) || activeUuids.contains(sel.id)) continue;
+                String t = (sel.category_info != null) ? sel.category_info.type : null;
+                if (t == 'GL_ACCOUNT') continue;
+                Id variableId = toVariableId(sel.external_id);
+                if (variableId != null) uuidByVariableId.put(variableId, sel.id);
+            }
+        }
+        if (uuidByVariableId.isEmpty()) return result;
+
+        Set<Id> stillExists = new Map<Id, AcctSeed__Accounting_Variable__c>([
+            SELECT Id FROM AcctSeed__Accounting_Variable__c WHERE Id IN :uuidByVariableId.keySet()
+        ]).keySet();
+        for (Id variableId : uuidByVariableId.keySet()) {
+            if (!stillExists.contains(variableId)) result.add(uuidByVariableId.get(variableId));
+        }
+        return result;
+    }
+
+    /** external_id as an Accounting Variable Id, or null when it points at anything else. */
+    private static Id toVariableId(String externalId) {
+        if (String.isBlank(externalId) || !externalId.startsWith(VARIABLE_KEY_PREFIX)) return null;
+        if (externalId.length() != 15 && externalId.length() != 18) return null;
+        try {
+            return Id.valueOf(externalId);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * @description Date -> covering Accounting Period. Returns the period record (not
+     * just its Id) so callers can reject a Closed period with a message naming it —
+     * Accounting Seed only blocks closed periods at post time, and the records we
+     * build are non-posted, so an unchecked Closed period strands them (FS-15065).
+     */
+    private static Map<Date, AcctSeed__Accounting_Period__c> resolvePeriods(List<Bill> bills) {
+        Map<Date, AcctSeed__Accounting_Period__c> periodByDate = new Map<Date, AcctSeed__Accounting_Period__c>();
         Set<Date> allDates = new Set<Date>();
         for (Bill b : bills) {
             Date d = parseDate(b.issued_at != null ? b.issued_at : b.accounting_date);
@@ -342,15 +480,26 @@ public with sharing class RampBillBuilder {
             if (maxDate == null || d > maxDate) maxDate = d;
         }
         for (AcctSeed__Accounting_Period__c p : [
-            SELECT Id, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
+            SELECT Id, Name, AcctSeed__Status__c, AcctSeed__Start_Date__c, AcctSeed__End_Date__c
             FROM AcctSeed__Accounting_Period__c
             WHERE AcctSeed__Start_Date__c <= :maxDate AND AcctSeed__End_Date__c >= :minDate
         ]) {
             for (Date d : allDates) {
-                if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p.Id);
+                if (d >= p.AcctSeed__Start_Date__c && d <= p.AcctSeed__End_Date__c) periodByDate.put(d, p);
             }
         }
         return periodByDate;
+    }
+
+    /**
+     * @description Wording for a Closed-period failure (FS-15065). Names both the
+     * period and the date that landed in it, so the error queue entry is actionable
+     * without opening Ramp.
+     */
+    private static String closedPeriodMessage(String periodName, Date d, String dateFieldLabel) {
+        return 'Accounting Period ' + (String.isBlank(periodName) ? '(unnamed)' : periodName)
+            + ' covering date ' + String.valueOf(d) + ' is closed in Accounting Seed. '
+            + 'Reopen the period or adjust the ' + dateFieldLabel + ' in Ramp.';
     }
 
     private static Date parseDate(String isoOrDate) {

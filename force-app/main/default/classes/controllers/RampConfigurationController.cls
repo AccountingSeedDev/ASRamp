@@ -601,7 +601,7 @@ public with sharing class RampConfigurationController {
     }
 
     /** @description Read the Reference Lookup toggle + key template for the config subtab. */
-    @AuraEnabled(cacheable=true)
+    @AuraEnabled(cacheable=false)
     public static ReferenceLookupConfig getReferenceLookupConfig() {
         ReferenceLookupConfig cfg = new ReferenceLookupConfig();
         cfg.enabled = RampSyncSettingsService.referenceLookupEnabled();
@@ -616,6 +616,16 @@ public with sharing class RampConfigurationController {
      */
     @AuraEnabled
     public static String saveReferenceLookupConfig(Boolean enabled, String template) {
+        // Enabled with a blank template leaves the feature switched on but inert:
+        // resolveReferences() short-circuits on a blank template, so no key is
+        // computed and no reference row can ever match, with nothing anywhere to
+        // say why (FS-15092). Reject it instead of storing it.
+        if (enabled == true && String.isBlank(template)) {
+            throw new AuraHandledException(
+                'Enter a Reference Key Template before enabling Reference Lookup. ' +
+                'Without a template no key is computed and no reference row can match.'
+            );
+        }
         try {
             Ramp_Sync_Settings__mdt s = RampSyncSettingsService.getSettings();
             System.enqueueJob(new RampSyncSettingsDeployQueueable(

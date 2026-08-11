@@ -93,7 +93,8 @@ public with sharing class RampBillService {
             for (RampBillBuilder.PayableBuild pb : payable2b) {
                 if (!batchByPeriod.containsKey(pb.paymentPeriodId)) {
                     batchByPeriod.put(pb.paymentPeriodId, new AcctSeed__Cash_Disbursement_Batch__c(
-                        AcctSeed__ExtId__c = BATCH_EXTID_PREFIX + pb.paymentPeriodId
+                        AcctSeed__ExtId__c = BATCH_EXTID_PREFIX + pb.paymentPeriodId,
+                        Name = 'Ramp Bill Payment ' + String.valueOf(pb.cashDisbursement.AcctSeed__Disbursement_Date__c)
                     ));
                 }
             }

@@ -81,15 +81,10 @@ public with sharing class RampGLAccountService {
                 }
             }
 
-            Integer restamped = 0;
-            if (!toRestamp.isEmpty()) {
-                update toRestamp;
-                restamped = toRestamp.size();
-            }
-
-            // 3. POST only the truly new ones, in batches of BATCH_SIZE.
+            // 3. POST only the truly new ones — all callouts first, collect ramp_id maps, NO DML yet.
             Integer created = 0;
             Integer totalBatches = 0;
+            Map<String, String> allNewRampIds = new Map<String, String>();
             if (!toCreate.isEmpty()) {
                 totalBatches = (Integer) Math.ceil((Decimal) toCreate.size() / BATCH_SIZE);
                 for (Integer i = 0; i < totalBatches; i++) {
@@ -97,19 +92,75 @@ public with sharing class RampGLAccountService {
                     Integer endIdx = Math.min(startIdx + BATCH_SIZE, toCreate.size());
                     List<AcctSeed__GL_Account__c> batch = new List<AcctSeed__GL_Account__c>();
                     for (Integer j = startIdx; j < endIdx; j++) batch.add(toCreate[j]);
-
-                    syncGLAccountBatch(batch);
+                    allNewRampIds.putAll(syncGLAccountBatch(batch));
                     created += batch.size();
                 }
             }
 
+            // 4. All callouts done — now safe to do all DML.
+            // Use partial-success DML (allOrNone=false) so write-back failures caused
+            // by validation rules or sharing rules do not throw, which would roll back
+            // the AJR insert and leave no audit trail of the run.
+            List<AcctSeed__GL_Account__c> toWriteBack = new List<AcctSeed__GL_Account__c>();
+            for (AcctSeed__GL_Account__c gl : toCreate) {
+                String rampId = allNewRampIds.get(gl.Id);
+                if (String.isNotBlank(rampId)) {
+                    gl.Ramp_Id__c = rampId;
+                    toWriteBack.add(gl);
+                }
+            }
+
+            Integer writeBackOk = 0;
+            Integer writeBackFailed = 0;
+            List<String> writeBackErrors = new List<String>();
+            if (!toWriteBack.isEmpty()) {
+                List<Database.SaveResult> srs = Database.update(toWriteBack, false);
+                for (Integer i = 0; i < srs.size(); i++) {
+                    if (srs[i].isSuccess()) {
+                        writeBackOk++;
+                    } else {
+                        writeBackFailed++;
+                        List<Database.Error> errs = srs[i].getErrors();
+                        String errMsg = errs.isEmpty() ? 'Unknown error' : errs[0].getMessage();
+                        writeBackErrors.add(toWriteBack[i].Name + ': ' + errMsg);
+                    }
+                }
+            }
+
+            Integer restamped = 0;
+            Integer restampFailed = 0;
+            if (!toRestamp.isEmpty()) {
+                List<Database.SaveResult> srs = Database.update(toRestamp, false);
+                for (Integer i = 0; i < srs.size(); i++) {
+                    if (srs[i].isSuccess()) {
+                        restamped++;
+                    } else {
+                        restampFailed++;
+                        List<Database.Error> errs = srs[i].getErrors();
+                        String errMsg = errs.isEmpty() ? 'Unknown error' : errs[0].getMessage();
+                        writeBackErrors.add('Restamp ' + toRestamp[i].Name + ': ' + errMsg);
+                    }
+                }
+            }
+
+            // Records Ramp accepted but whose ID was not echoed back — write-back impossible.
+            Integer notStamped = toCreate.size() - toWriteBack.size();
+            Integer totalFailed = notStamped + writeBackFailed + restampFailed;
+
             List<String> parts = new List<String>();
-            if (created > 0) parts.add('created ' + created + ' (' + totalBatches + ' batch(es))');
+            if (writeBackOk > 0) parts.add('created ' + writeBackOk + ' (' + totalBatches + ' batch(es))');
             if (restamped > 0) parts.add('restored Ramp_Id__c on ' + restamped + ' existing record(s)');
+            if (notStamped > 0) parts.add('WARNING: ' + notStamped + ' record(s) sent to Ramp but received no ID echo — Ramp_Id__c not stamped');
+            if (writeBackFailed > 0) parts.add('ERROR: ' + writeBackFailed + ' Ramp_Id__c write-back failure(s) — GL Account created in Ramp but Salesforce record not updated');
+            if (restampFailed > 0) parts.add('ERROR: ' + restampFailed + ' re-stamp failure(s) — Ramp_Id__c could not be saved to existing record(s)');
             if (parts.isEmpty()) parts.add('all GL Accounts already linked — nothing to do');
             String summary = 'GL Account sync complete: ' + String.join(parts, '; ') + '.';
+            String notes = summary;
+            if (!writeBackErrors.isEmpty()) {
+                notes = RampJobResultLogger.appendNote(notes, 'Write-back errors:\n' + String.join(writeBackErrors, '\n'));
+            }
             RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC,
-                glAccounts.size(), glAccounts.size(), 0, summary);
+                glAccounts.size(), writeBackOk + restamped, totalFailed, notes);
             return summary;
         } catch (Exception e) {
             RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC, 0, 0, 1,
@@ -150,8 +201,7 @@ public with sharing class RampGLAccountService {
                     Map<String, Object> a = (Map<String, Object>) o;
                     String sfId = (String) a.get('id');
                     String rampId = (String) a.get('ramp_id');
-                    Boolean isActive = (Boolean) a.get('is_active');
-                    if (String.isNotBlank(sfId) && String.isNotBlank(rampId) && isActive == true) {
+                    if (String.isNotBlank(sfId) && String.isNotBlank(rampId)) {
                         sfIdToRampId.put(sfId, rampId);
                     }
                 }
@@ -182,37 +232,34 @@ public with sharing class RampGLAccountService {
     }
 
     /**
-     * @description Syncs a batch of GL Accounts to Ramp
+     * @description Syncs a batch of GL Accounts to Ramp and returns the map of
+     * Salesforce Id to Ramp Id parsed from the response. No DML is performed here.
      * @param glAccounts List of GL Accounts to sync (max 500)
+     * @return Map of Salesforce Id to Ramp Id for each synced account
      */
     @TestVisible
-    private static void syncGLAccountBatch(List<AcctSeed__GL_Account__c> glAccounts) {
+    private static Map<String, String> syncGLAccountBatch(List<AcctSeed__GL_Account__c> glAccounts) {
         try {
-            // Build request body
             List<GLAccountWrapper> accountsToSync = new List<GLAccountWrapper>();
 
             for (AcctSeed__GL_Account__c gl : glAccounts) {
                 GLAccountWrapper wrapper = new GLAccountWrapper();
                 wrapper.id = gl.Id;
                 wrapper.name = gl.Name;
-                wrapper.code = gl.Name; // Using Name as code; adjust if GL Account has a code field
+                wrapper.code = gl.Id;
                 wrapper.classification = mapToRampClassification(gl.AcctSeed__Type__c);
-
                 accountsToSync.add(wrapper);
             }
 
-            // Wrap accounts in a dictionary as required by Ramp API
             Map<String, Object> requestBody = new Map<String, Object>{
                 'gl_accounts' => accountsToSync
             };
             String body = JSON.serialize(requestBody);
 
-            // Send to Ramp
             HttpResponse res = RampAPIService.post('/developer/v1/accounting/accounts', body);
 
             if (res.getStatusCode() == 200 || res.getStatusCode() == 201) {
-                // Parse response and update Ramp IDs
-                updateRampIds(glAccounts, res.getBody());
+                return parseRampIds(res.getBody());
             } else {
                 throw new RampGLAccountException(
                     'Failed to sync GL Accounts. Status: ' + res.getStatusCode() +
@@ -225,13 +272,14 @@ public with sharing class RampGLAccountService {
     }
 
     /**
-     * @description Updates GL Accounts with Ramp IDs from the response
-     * @param glAccounts The GL Accounts that were synced
+     * @description Parses the Ramp POST response and returns a map of
+     * Salesforce Id (the "id" we sent) to Ramp Id. No DML is performed.
      * @param responseBody The JSON response from Ramp
+     * @return Map of Salesforce Id to Ramp Id
      */
-    private static void updateRampIds(List<AcctSeed__GL_Account__c> glAccounts, String responseBody) {
+    private static Map<String, String> parseRampIds(String responseBody) {
+        Map<String, String> sfIdToRampId = new Map<String, String>();
         try {
-            // Parse response - Ramp may return object with gl_accounts array or just an array
             Object parsed = JSON.deserializeUntyped(responseBody);
             List<Object> syncedAccounts;
 
@@ -240,53 +288,29 @@ public with sharing class RampGLAccountService {
                 if (responseMap.containsKey('gl_accounts')) {
                     syncedAccounts = (List<Object>) responseMap.get('gl_accounts');
                 } else {
-                    // Response might be a single object or different structure
-                    return;
+                    return sfIdToRampId;
                 }
             } else if (parsed instanceof List<Object>) {
                 syncedAccounts = (List<Object>) parsed;
             } else {
-                return;
+                return sfIdToRampId;
             }
-
-            // Create a map of our ID to Ramp's returned ID
-            Map<String, String> sfIdToRampId = new Map<String, String>();
 
             for (Object obj : syncedAccounts) {
                 Map<String, Object> account = (Map<String, Object>) obj;
-                // The 'id' we sent is our Salesforce ID, Ramp may return it back
-                // along with their internal ID (could be in a different field)
                 String ourId = (String) account.get('id');
                 String rampId = (String) account.get('ramp_id');
-
-                // If ramp_id not present, the 'id' field might be Ramp's ID
-                // and our ID might be in a different field
                 if (String.isBlank(rampId)) {
                     rampId = ourId;
                 }
-
                 if (String.isNotBlank(ourId) && String.isNotBlank(rampId)) {
                     sfIdToRampId.put(ourId, rampId);
                 }
             }
-
-            // Update GL Accounts with Ramp IDs
-            List<AcctSeed__GL_Account__c> toUpdate = new List<AcctSeed__GL_Account__c>();
-
-            for (AcctSeed__GL_Account__c gl : glAccounts) {
-                if (sfIdToRampId.containsKey(gl.Id)) {
-                    gl.Ramp_Id__c = sfIdToRampId.get(gl.Id);
-                    toUpdate.add(gl);
-                }
-            }
-
-            if (!toUpdate.isEmpty()) {
-                update toUpdate;
-            }
         } catch (Exception e) {
-            // Log error but don't fail the entire sync
-            System.debug('Error updating Ramp IDs: ' + e.getMessage());
+            throw new RampGLAccountException('Failed to parse Ramp response: ' + e.getMessage(), e);
         }
+        return sfIdToRampId;
     }
 
     /**

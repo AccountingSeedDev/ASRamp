@@ -57,8 +57,10 @@ public class RampTransactionSyncQueueable implements Queueable, Database.AllowsC
 
         // Count at the transaction (document) grain so processed = succeeded + failed.
         // (Many transactions can fold into fewer grouped JEs, so JE count is not the
-        // success count.)
-        Integer pageSucceeded = Math.max(0, result.transactionsFetched - result.failedCount);
+        // success count.) succeededCount is tallied from transactions that actually
+        // reached a persisted JE — deriving it as (fetched - failed) reported any
+        // silently dropped transaction as a success (FS-15031).
+        Integer pageSucceeded = result.succeededCount;
         Integer p = cumProcessed + result.transactionsFetched;
         Integer s = cumSucceeded + pageSucceeded;
         Integer f = cumFailed + result.failedCount;
