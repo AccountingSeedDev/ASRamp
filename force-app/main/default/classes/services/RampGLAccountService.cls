@@ -50,6 +50,10 @@ public with sharing class RampGLAccountService {
      * a manual local clear of Ramp_Id__c.
      */
     public static String syncAllGLAccounts() {
+        // Hoisted so the catch block can report how many records were in flight.
+        // No write-back happens until every callout has completed, so a thrown
+        // error means the whole run failed — not zero records processed.
+        Integer attempted = 0;
         try {
             List<AcctSeed__GL_Account__c> glAccounts = [
                 SELECT Id, Name, AcctSeed__Bank__c, AcctSeed__Type__c,
@@ -58,6 +62,7 @@ public with sharing class RampGLAccountService {
                 WHERE AcctSeed__Active__c = true
                 ORDER BY Name
             ];
+            attempted = glAccounts.size();
 
             if (glAccounts.isEmpty()) {
                 RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC, 0, 0, 0,
@@ -80,6 +85,11 @@ public with sharing class RampGLAccountService {
                     toRestamp.add(gl);
                 }
             }
+
+            // Records already carrying the right Ramp Id need no work, but they are
+            // part of the run and are in the desired state — count them as succeeded
+            // so Processed reconciles to Succeeded + Failed.
+            Integer alreadyLinked = glAccounts.size() - toCreate.size() - toRestamp.size();
 
             // 3. POST only the truly new ones — all callouts first, collect ramp_id maps, NO DML yet.
             Integer created = 0;
@@ -146,6 +156,7 @@ public with sharing class RampGLAccountService {
             // Records Ramp accepted but whose ID was not echoed back — write-back impossible.
             Integer notStamped = toCreate.size() - toWriteBack.size();
             Integer totalFailed = notStamped + writeBackFailed + restampFailed;
+            Integer totalSucceeded = alreadyLinked + writeBackOk + restamped;
 
             List<String> parts = new List<String>();
             if (writeBackOk > 0) parts.add('created ' + writeBackOk + ' (' + totalBatches + ' batch(es))');
@@ -159,12 +170,21 @@ public with sharing class RampGLAccountService {
             if (!writeBackErrors.isEmpty()) {
                 notes = RampJobResultLogger.appendNote(notes, 'Write-back errors:\n' + String.join(writeBackErrors, '\n'));
             }
+            // Processed is derived from the outcome counters rather than the query
+            // size so it always equals Succeeded + Failed, matching how the vendor
+            // and accounting-variable jobs report (FS-15044). The sum still comes to
+            // glAccounts.size() — every record lands in exactly one bucket.
             RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC,
-                glAccounts.size(), writeBackOk + restamped, totalFailed, notes);
+                totalSucceeded + totalFailed, totalSucceeded, totalFailed, notes);
             return summary;
         } catch (Exception e) {
-            RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC, 0, 0, 1,
-                'GL Account sync failed: ' + e.getMessage());
+            // The run threw before any write-back, so every record in flight failed.
+            // Never report Failed = 0 here: RampHomeController.masterFailures keys the
+            // error-queue row off Failed__c > 0, so a failure with nothing queried yet
+            // still has to count as one.
+            Integer failedCount = attempted > 0 ? attempted : 1;
+            RampJobResultLogger.record(null, RampJobResultLogger.JOB_GL_SYNC,
+                failedCount, 0, failedCount, 'GL Account sync failed: ' + e.getMessage());
             throw new RampGLAccountException('Error syncing GL Accounts: ' + e.getMessage(), e);
         }
     }

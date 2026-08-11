@@ -573,6 +573,7 @@ private class RampGLAccountServiceTest {
             System.assertEquals(1, ajrs.size(), 'AJR should be created for every sync run');
             System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c, 'No failures on clean success');
             System.assert((Integer) ajrs[0].AcctSeed__Succeeded__c > 0, 'Succeeded count should be positive');
+            assertProcessedReconciles(ajrs[0]);
         }
     }
 
@@ -599,13 +600,14 @@ private class RampGLAccountServiceTest {
             System.assert(result.contains('WARNING'), 'Should warn about records with no ID echo: ' + result);
 
             List<AcctSeed__Automated_Job_Results__c> ajrs = [
-                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c
+                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Processed__c
                 FROM AcctSeed__Automated_Job_Results__c
                 WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_GL_SYNC
             ];
             System.assertEquals(1, ajrs.size(), 'AJR should be created even when some records have no echo');
             System.assert((Integer) ajrs[0].AcctSeed__Failed__c > 0,
                 'AJR failed count should reflect records that could not be stamped');
+            assertProcessedReconciles(ajrs[0]);
         }
     }
 
@@ -629,17 +631,114 @@ private class RampGLAccountServiceTest {
             System.assert(result.contains('ERROR'), 'Summary should contain ERROR for write-back failures: ' + result);
 
             List<AcctSeed__Automated_Job_Results__c> ajrs = [
-                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Notes__c
+                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Processed__c,
+                       AcctSeed__Notes__c
                 FROM AcctSeed__Automated_Job_Results__c
                 WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_GL_SYNC
             ];
             System.assertEquals(1, ajrs.size(), 'AJR must be committed even when write-back DML fails');
             System.assert((Integer) ajrs[0].AcctSeed__Failed__c > 0,
                 'AJR Failed__c should reflect the write-back failures');
+            assertProcessedReconciles(ajrs[0]);
             System.assert(String.isNotBlank(ajrs[0].AcctSeed__Notes__c), 'AJR Notes should contain error details');
             System.assert(ajrs[0].AcctSeed__Notes__c.contains('Write-back errors'),
                 'AJR Notes should list the write-back errors: ' + ajrs[0].AcctSeed__Notes__c);
         }
+    }
+
+    @IsTest
+    static void testSyncAllGLAccounts_HardFailure_ProcessedReflectsAttempted() {
+        // FS-15044: a run that throws used to log Processed = 0, Succeeded = 0,
+        // Failed = 1 no matter how many records were in flight. Nothing is written
+        // back until every callout finishes, so a throw means every attempted
+        // record failed — and Processed must still equal Succeeded + Failed.
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            Integer activeCount = [
+                SELECT COUNT() FROM AcctSeed__GL_Account__c WHERE AcctSeed__Active__c = true
+            ];
+            System.assert(activeCount > 0, 'Need active GL Accounts for this test');
+
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountMockError());
+
+            Test.startTest();
+            try {
+                RampGLAccountService.syncAllGLAccounts();
+                System.assert(false, 'Expected exception to be thrown');
+            } catch (RampGLAccountService.RampGLAccountException e) {
+                // expected — the AJR assertions below are the point of this test
+            }
+            Test.stopTest();
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Processed__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_GL_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'AJR must be committed when the run throws');
+            System.assertEquals(activeCount, (Integer) ajrs[0].AcctSeed__Processed__c,
+                'Processed should be every record that was in flight, not 0');
+            System.assertEquals(activeCount, (Integer) ajrs[0].AcctSeed__Failed__c,
+                'All in-flight records failed — none were written back');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Succeeded__c,
+                'Nothing succeeded on a hard failure');
+            assertProcessedReconciles(ajrs[0]);
+        }
+    }
+
+    @IsTest
+    static void testSyncAllGLAccounts_AlreadyLinked_CountAsSucceeded() {
+        // FS-15044: GL Accounts already carrying the correct Ramp Id need no work,
+        // but they are part of the run. Before the fix an idle run reported
+        // Processed = N, Succeeded = 0, Failed = 0 — which reads as total failure.
+        User adminUser = TestDataFactory.getInstance().getAdminUser();
+
+        System.runAs(adminUser) {
+            List<AcctSeed__GL_Account__c> activeGLs = [
+                SELECT Id, Ramp_Id__c FROM AcctSeed__GL_Account__c
+                WHERE AcctSeed__Active__c = true
+            ];
+            System.assert(activeGLs.size() > 0, 'Need at least one active GL');
+
+            // Pre-stamp the exact ids RampGLAccountMockAllExist reports, so every
+            // record falls into the already-linked bucket: no create, no re-stamp.
+            for (AcctSeed__GL_Account__c gl : activeGLs) gl.Ramp_Id__c = 'ramp_uuid_' + gl.Id;
+            update activeGLs;
+
+            Test.setMock(HttpCalloutMock.class, new RampGLAccountMockAllExist(activeGLs));
+
+            Test.startTest();
+            String result = RampGLAccountService.syncAllGLAccounts();
+            Test.stopTest();
+
+            System.assert(result.contains('nothing to do'), 'Should report nothing to do: ' + result);
+
+            List<AcctSeed__Automated_Job_Results__c> ajrs = [
+                SELECT Id, AcctSeed__Failed__c, AcctSeed__Succeeded__c, AcctSeed__Processed__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_GL_SYNC
+            ];
+            System.assertEquals(1, ajrs.size(), 'AJR should be created for every sync run');
+            System.assertEquals(activeGLs.size(), (Integer) ajrs[0].AcctSeed__Succeeded__c,
+                'Already-linked records should count as succeeded');
+            System.assertEquals(0, (Integer) ajrs[0].AcctSeed__Failed__c, 'Nothing failed');
+            assertProcessedReconciles(ajrs[0]);
+        }
+    }
+
+    /**
+     * @description FS-15044 invariant: the Automated Job Result's Processed count
+     * must always equal Succeeded + Failed, matching how the vendor and accounting
+     * variable jobs report.
+     */
+    private static void assertProcessedReconciles(AcctSeed__Automated_Job_Results__c ajr) {
+        Integer processed = (Integer) ajr.AcctSeed__Processed__c;
+        Integer succeeded = (Integer) ajr.AcctSeed__Succeeded__c;
+        Integer failed = (Integer) ajr.AcctSeed__Failed__c;
+        System.assertEquals(succeeded + failed, processed,
+            'Processed (' + processed + ') should equal Succeeded (' + succeeded +
+            ') + Failed (' + failed + ')');
     }
 
     /**
