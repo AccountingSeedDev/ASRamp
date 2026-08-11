@@ -131,7 +131,10 @@ public with sharing class RampConfigurationController {
         try {
             return RampGLAccountService.syncAllGLAccounts();
         } catch (Exception e) {
-            throw new AuraHandledException('Error syncing GL Accounts: ' + e.getMessage());
+            // The service already prefixes every escape path with
+            // 'Error syncing GL Accounts: ' — re-adding it here doubled the prefix
+            // in the toast the user sees (FS-15044).
+            throw new AuraHandledException(e.getMessage());
         }
     }
 
