@@ -168,25 +168,102 @@ public with sharing class RampBillService {
             }
         }
 
-        // ---- Acks (wired; fire only when enabled) ----
-        if (RampSyncSettingsService.getSendSyncAck()) {
-            if (!billOk.isEmpty() || !billFail.isEmpty()) {
-                postAckAsync(SYNC_TYPE_BILL, JSON.serialize(billOk), JSON.serialize(billFail), 'AP', JSON.serialize(new List<Id>(payableIdsToFlip)));
+        // ---- Record what posted, synchronously ----
+        // The ack below is optional and off by default, so a status that waits on
+        // it leaves every payable at "Pending" and the home dashboard reporting 0
+        // synced no matter how many records posted cleanly (FS-15109). Status
+        // reflects the Accounting Seed write; a failed ack downgrades it after.
+        List<AcctSeed__Account_Payable__c> apStatus = new List<AcctSeed__Account_Payable__c>();
+        List<AcctSeed__Cash_Disbursement__c> cdStatus = new List<AcctSeed__Cash_Disbursement__c>();
+        for (RampBillBuilder.PayableBuild pb : build.successful) {
+            if (pb.header.Id == null) continue;   // header upsert failed — no record to stamp
+            String reason = headerFailure.get(pb.billId);
+            if (reason == null) reason = lineFailure.get(pb.billId);
+            apStatus.add(payableStatus(pb.header.Id, reason));
+
+            if (pb.cashDisbursement != null && pb.cashDisbursement.Id != null) {
+                cdStatus.add(new AcctSeed__Cash_Disbursement__c(
+                    Id = pb.cashDisbursement.Id,
+                    Ramp_Sync_Status__c = cdFailure.containsKey(pb.billId) ? 'Failed' : 'Synced_To_Ramp',
+                    Ramp_Sync_Error__c = cdFailure.containsKey(pb.billId) ? truncate(cdFailure.get(pb.billId), 1000) : null
+                ));
             }
-            if (!payOk.isEmpty() || !payFail.isEmpty()) {
-                postAckAsync(SYNC_TYPE_PAYMENT, JSON.serialize(payOk), JSON.serialize(payFail), 'CD', JSON.serialize(new List<Id>(cdIdsToFlip)));
-            }
+        }
+        if (!apStatus.isEmpty()) Database.update(apStatus, false);
+        if (!cdStatus.isEmpty()) Database.update(cdStatus, false);
+
+        // ---- Acks (fire only when enabled) ----
+        // One @future making two sequential POSTs, not two racing ones: Ramp
+        // rejects BILL_PAYMENT_SYNC for a bill it hasn't accepted a BILL_SYNC for
+        // yet ("not ready for sync"), and parallel @futures have no ordering
+        // guarantee. When the payment ack won that race it 400'd and stamped
+        // perfectly good Cash Disbursements "Failed".
+        Boolean anyAck = !billOk.isEmpty() || !billFail.isEmpty() || !payOk.isEmpty() || !payFail.isEmpty();
+        if (anyAck && RampSyncSettingsService.getSendSyncAck()) {
+            postAckAsync(
+                JSON.serialize(billOk), JSON.serialize(billFail), JSON.serialize(new List<Id>(payableIdsToFlip)),
+                JSON.serialize(payOk), JSON.serialize(payFail), JSON.serialize(new List<Id>(cdIdsToFlip)));
         }
         return result;
     }
 
+    /** Payable status for a posted bill — Failed with the reason, or Synced. */
+    private static AcctSeed__Account_Payable__c payableStatus(Id recId, String reason) {
+        return new AcctSeed__Account_Payable__c(
+            Id = recId,
+            Ramp_Sync_Status__c = (reason == null) ? 'Synced_To_Ramp' : 'Failed',
+            Ramp_Sync_Error__c = (reason == null) ? null : truncate(reason, 1000)
+        );
+    }
+
+    /**
+     * @description Acknowledge one page to Ramp: BILL_SYNC first, then
+     * BILL_PAYMENT_SYNC only once the bill ack has succeeded. The order is a Ramp
+     * requirement — a payment ack for a bill that isn't bill-synced yet is
+     * rejected — so both POSTs run sequentially inside one @future.
+     */
     @future(callout=true)
     @TestVisible
-    private static void postAckAsync(String syncType, String successfulJson, String failedJson, String objType, String idsJson) {
-        List<Object> successful = (List<Object>) JSON.deserializeUntyped(successfulJson);
-        List<Object> failed = (List<Object>) JSON.deserializeUntyped(failedJson);
-        if (successful.isEmpty() && failed.isEmpty()) return;
+    private static void postAckAsync(String billOkJson, String billFailJson, String payableIdsJson,
+            String payOkJson, String payFailJson, String cdIdsJson) {
+        AckOutcome bill = postAck(SYNC_TYPE_BILL, billOkJson, billFailJson);
+        Boolean billAckFailed = bill.attempted && !bill.succeeded;
+        if (billAckFailed) markFailed('AP', payableIdsJson, bill.error);
 
+        if (!hasPayload(payOkJson, payFailJson)) return;
+
+        // Ramp is unaware of the bills, so a payment ack cannot succeed. Don't
+        // send it — and say why on the disbursements rather than reporting Ramp's
+        // "not ready for sync" rejection, which reads like a data problem.
+        if (billAckFailed) {
+            markFailed('CD', cdIdsJson,
+                'Bill acknowledgement failed, so the payment was not acknowledged to Ramp: ' + bill.error);
+            return;
+        }
+
+        AckOutcome pay = postAck(SYNC_TYPE_PAYMENT, payOkJson, payFailJson);
+        if (pay.attempted && !pay.succeeded) markFailed('CD', cdIdsJson, pay.error);
+    }
+
+    /** Result of one /accounting/syncs POST. attempted=false → nothing to send. */
+    public class AckOutcome {
+        public Boolean attempted = false;
+        public Boolean succeeded = false;
+        public String error;
+    }
+
+    private static Boolean hasPayload(String okJson, String failJson) {
+        return !((List<Object>) JSON.deserializeUntyped(okJson)).isEmpty()
+            || !((List<Object>) JSON.deserializeUntyped(failJson)).isEmpty();
+    }
+
+    private static AckOutcome postAck(String syncType, String okJson, String failJson) {
+        AckOutcome out = new AckOutcome();
+        List<Object> successful = (List<Object>) JSON.deserializeUntyped(okJson);
+        List<Object> failed = (List<Object>) JSON.deserializeUntyped(failJson);
+        if (successful.isEmpty() && failed.isEmpty()) return out;
+
+        out.attempted = true;
         Map<String, Object> body = new Map<String, Object>{
             'idempotency_key' => RampTransactionService.newRunId(),
             'sync_type' => syncType
@@ -194,33 +271,43 @@ public with sharing class RampBillService {
         if (!successful.isEmpty()) body.put('successful_syncs', successful);
         if (!failed.isEmpty()) body.put('failed_syncs', failed);
 
-        Boolean ackSucceeded = false;
-        String errorMessage = null;
         try {
             HttpResponse res = RampAPIService.post('/developer/v1/accounting/syncs', JSON.serialize(body));
-            if (res.getStatusCode() >= 200 && res.getStatusCode() < 300) ackSucceeded = true;
-            else errorMessage = '/accounting/syncs (' + syncType + ') returned ' + res.getStatusCode() + ': ' + res.getBody();
+            if (res.getStatusCode() >= 200 && res.getStatusCode() < 300) out.succeeded = true;
+            else out.error = '/accounting/syncs (' + syncType + ') returned ' + res.getStatusCode() + ': ' + res.getBody();
         } catch (Exception e) {
-            errorMessage = 'POST /accounting/syncs (' + syncType + ') failed: ' + e.getMessage();
+            out.error = 'POST /accounting/syncs (' + syncType + ') failed: ' + e.getMessage();
         }
+        return out;
+    }
 
-        List<Object> rawIds = (List<Object>) JSON.deserializeUntyped(idsJson);
+    /**
+     * @description Downgrade records whose ack didn't land. A successful ack needs
+     * no write — syncPage already stamped these "Synced_To_Ramp" when they posted.
+     */
+    private static void markFailed(String objType, String idsJson, String errorMessage) {
         Set<Id> ids = new Set<Id>();
-        for (Object o : rawIds) if (o != null) ids.add((Id) (String) o);
+        for (Object o : (List<Object>) JSON.deserializeUntyped(idsJson)) if (o != null) ids.add((Id) (String) o);
         if (ids.isEmpty()) return;
 
         if (objType == 'AP') {
-            List<AcctSeed__Account_Payable__c> recs = [SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Account_Payable__c WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Pending'];
+            List<AcctSeed__Account_Payable__c> recs = [
+                SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Account_Payable__c
+                WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Synced_To_Ramp'
+            ];
             for (AcctSeed__Account_Payable__c r : recs) {
-                if (ackSucceeded) { r.Ramp_Sync_Status__c = 'Synced_To_Ramp'; r.Ramp_Sync_Error__c = null; }
-                else { r.Ramp_Sync_Status__c = 'Failed'; r.Ramp_Sync_Error__c = truncate(errorMessage, 1000); }
+                r.Ramp_Sync_Status__c = 'Failed';
+                r.Ramp_Sync_Error__c = truncate(errorMessage, 1000);
             }
             if (!recs.isEmpty()) Database.update(recs, false);
         } else {
-            List<AcctSeed__Cash_Disbursement__c> recs = [SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Pending'];
+            List<AcctSeed__Cash_Disbursement__c> recs = [
+                SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c
+                WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Synced_To_Ramp'
+            ];
             for (AcctSeed__Cash_Disbursement__c r : recs) {
-                if (ackSucceeded) { r.Ramp_Sync_Status__c = 'Synced_To_Ramp'; r.Ramp_Sync_Error__c = null; }
-                else { r.Ramp_Sync_Status__c = 'Failed'; r.Ramp_Sync_Error__c = truncate(errorMessage, 1000); }
+                r.Ramp_Sync_Status__c = 'Failed';
+                r.Ramp_Sync_Error__c = truncate(errorMessage, 1000);
             }
             if (!recs.isEmpty()) Database.update(recs, false);
         }

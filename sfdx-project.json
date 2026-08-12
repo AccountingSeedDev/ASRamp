@@ -1,8 +1,8 @@
 {
   "packageDirectories": [
     {
-      "versionName": "ver 0.11.0",
-      "versionNumber": "0.11.0.NEXT",
+      "versionName": "ver 0.12.0",
+      "versionNumber": "0.12.0.NEXT",
       "path": "force-app",
       "default": true,
       "package": "ASRamp",
@@ -38,6 +38,7 @@
     "ASRamp@0.8.0-1": "04tRi000000vYGHIA2",
     "ASRamp@0.9.0-1": "04tRi000000yFk9IAE",
     "ASRamp@0.10.0-1": "04tRi000000yPzdIAE",
-    "ASRamp@0.11.0-1": "04tRi000000yQR3IAM"
+    "ASRamp@0.11.0-1": "04tRi000000yQR3IAM",
+    "ASRamp@0.12.0-1": "04tRi000000yUMbIAM"
   }
 }
