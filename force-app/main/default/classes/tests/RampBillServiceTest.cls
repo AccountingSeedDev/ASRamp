@@ -171,6 +171,88 @@ private class RampBillServiceTest {
             'AJR Failed count should be >=1 when payment phase fails: ' + ajrs[0].AcctSeed__Failed__c);
     }
 
+    @IsTest
+    static void syncPage_paidBill_acksBillBeforePayment() {
+        Id vId = configureForSync();
+        ackTypes.clear();
+        Test.setMock(HttpCalloutMock.class, new AckRecordingMock(vId, null));
+
+        Test.startTest();
+        RampBillService.PageResult r = RampBillService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(0, r.failedCount, 'Errors: ' + r.errorMessages);
+        // Ramp rejects a payment ack for a bill it hasn't bill-synced yet, so the
+        // order is the contract — not an implementation detail.
+        System.assertEquals(new List<String>{ 'BILL_SYNC', 'BILL_PAYMENT_SYNC' }, ackTypes,
+            'BILL_SYNC must be acknowledged before BILL_PAYMENT_SYNC: ' + ackTypes);
+
+        AcctSeed__Cash_Disbursement__c cd = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c
+            WHERE AcctSeed__ExtId__c = 'ramp-bill-paid:cd'
+        ];
+        System.assertEquals('Synced_To_Ramp', cd.Ramp_Sync_Status__c, 'CD stays synced when both acks land');
+    }
+
+    @IsTest
+    static void syncPage_billAckFails_skipsPaymentAckAndExplainsOnCD() {
+        Id vId = configureForSync();
+        ackTypes.clear();
+        Test.setMock(HttpCalloutMock.class, new AckRecordingMock(vId, 'BILL_SYNC'));
+
+        Test.startTest();
+        RampBillService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(new List<String>{ 'BILL_SYNC' }, ackTypes,
+            'Payment ack must not be sent once the bill ack failed: ' + ackTypes);
+
+        AcctSeed__Account_Payable__c ap = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Account_Payable__c
+            WHERE AcctSeed__ExtId__c = 'ramp-bill-paid'
+        ];
+        System.assertEquals('Failed', ap.Ramp_Sync_Status__c, 'A failed bill ack downgrades the payable');
+
+        AcctSeed__Cash_Disbursement__c cd = [
+            SELECT Ramp_Sync_Status__c, Ramp_Sync_Error__c FROM AcctSeed__Cash_Disbursement__c
+            WHERE AcctSeed__ExtId__c = 'ramp-bill-paid:cd'
+        ];
+        System.assertEquals('Failed', cd.Ramp_Sync_Status__c);
+        System.assert(cd.Ramp_Sync_Error__c.contains('Bill acknowledgement failed'),
+            'CD error should name the real cause, not Ramp\'s "not ready for sync": ' + cd.Ramp_Sync_Error__c);
+    }
+
+    @IsTest
+    static void syncPage_ackDisabled_stillMarksPostedRecordsSynced() {
+        Id vId = configureForSync();
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'BillLedger-TEST', Default_JE_Status__c = 'In Process', Send_Sync_Ack__c = false
+        );
+        ackTypes.clear();
+        Test.setMock(HttpCalloutMock.class, new AckRecordingMock(vId, null));
+
+        Test.startTest();
+        RampBillService.PageResult r = RampBillService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(0, r.failedCount, 'Errors: ' + r.errorMessages);
+        System.assertEquals(0, ackTypes.size(), 'No ack should be POSTed while disabled: ' + ackTypes);
+
+        // The whole point of FS-15109: status reflects the Accounting Seed write, so
+        // the home dashboard counts these as synced even with the ack switched off.
+        AcctSeed__Account_Payable__c ap = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Account_Payable__c
+            WHERE AcctSeed__ExtId__c = 'ramp-bill-paid'
+        ];
+        System.assertEquals('Synced_To_Ramp', ap.Ramp_Sync_Status__c,
+            'A payable that posted is synced whether or not the ack is enabled');
+        AcctSeed__Cash_Disbursement__c cd = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c
+            WHERE AcctSeed__ExtId__c = 'ramp-bill-paid:cd'
+        ];
+        System.assertEquals('Synced_To_Ramp', cd.Ramp_Sync_Status__c);
+    }
+
     // --------------------------------------------------------------------
     //  Mocks
     // --------------------------------------------------------------------
@@ -203,6 +285,34 @@ private class RampBillServiceTest {
                 res.setBody(billJson(vendorId));
             } else if (req.getEndpoint().contains('/accounting/syncs')) {
                 res.setStatusCode(201); res.setBody('{"id":"sync-uuid"}');
+            } else {
+                res.setStatusCode(404); res.setBody('unexpected ' + req.getEndpoint());
+            }
+            return res;
+        }
+    }
+
+    // sync_type of every /accounting/syncs POST, in call order.
+    private static List<String> ackTypes = new List<String>();
+
+    /** Serves one paid bill and records each ack; optionally fails one sync_type. */
+    private class AckRecordingMock extends BaseMock {
+        private Id vendorId;
+        private String failSyncType;
+        public AckRecordingMock(Id v, String failSyncType) { this.vendorId = v; this.failSyncType = failSyncType; }
+        protected override HttpResponse api(HttpRequest req, HttpResponse res) {
+            if (req.getEndpoint().contains('/accounting/syncs')) {
+                Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(req.getBody());
+                String syncType = (String) body.get('sync_type');
+                ackTypes.add(syncType);
+                if (syncType == failSyncType) {
+                    res.setStatusCode(400);
+                    res.setBody('{"error_v2":{"error_code":"DEVELOPER_7062","message":"The following sync objects are not ready for sync."}}');
+                } else {
+                    res.setStatusCode(201); res.setBody('{"id":"sync-uuid"}');
+                }
+            } else if (req.getEndpoint().contains('/bills')) {
+                res.setStatusCode(200); res.setBody(paidBillJson(vendorId));
             } else {
                 res.setStatusCode(404); res.setBody('unexpected ' + req.getEndpoint());
             }

@@ -150,7 +150,7 @@ private class RampReimbursementServiceTest {
             FROM AcctSeed__Account_Payable__c WHERE AcctSeed__ExtId__c = 'ramp-reimb-fail-1'
         ];
         System.assertEquals(1, aps.size(), 'Payable header should have been created despite line failure');
-        System.assertEquals('Failed', aps[0].Ramp_Sync_Status__c, 'toFail block should mark payable as Failed');
+        System.assertEquals('Failed', aps[0].Ramp_Sync_Status__c, 'A line DML failure should mark the payable Failed');
         System.assert(String.isNotBlank(aps[0].Ramp_Sync_Error__c), 'Ramp_Sync_Error__c should be populated with the line error');
     }
 
@@ -200,6 +200,70 @@ private class RampReimbursementServiceTest {
         System.assertEquals(0, r.cashDisbursementsCreated, 'No CD should be created without bank GL');
         System.assertEquals(1, r.errorMessages.size(), 'Warning should be logged to AJR notes: ' + r.errorMessages);
         System.assert(r.errorMessages[0].contains('Ramp Bill Payment Bank'), 'Warning should mention the missing GL Account config: ' + r.errorMessages[0]);
+    }
+
+    @IsTest
+    static void syncPage_ackDisabled_stillMarksPostedRecordsSynced() {
+        String email = configureForSync();
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'ReimbLedger-TEST', Default_JE_Status__c = 'In Process', Send_Sync_Ack__c = false
+        );
+        Date payDate = [SELECT AcctSeed__Start_Date__c FROM AcctSeed__Accounting_Period__c WHERE AcctSeed__Status__c = 'Open' ORDER BY AcctSeed__Start_Date__c DESC LIMIT 1].AcctSeed__Start_Date__c;
+        Test.setMock(HttpCalloutMock.class, new ReimbursedMock(email, payDate));
+
+        Test.startTest();
+        RampReimbursementService.PageResult r = RampReimbursementService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(0, r.failedCount, 'Errors: ' + r.errorMessages);
+        // FS-15109: the ack is off by default, so a status gated on it left every
+        // payable at "Pending" and the home dashboard reporting 0 synced.
+        AcctSeed__Account_Payable__c ap = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Account_Payable__c
+            WHERE AcctSeed__ExtId__c = 'ramp-reimb-paid-1'
+        ];
+        System.assertEquals('Synced_To_Ramp', ap.Ramp_Sync_Status__c,
+            'A payable that posted is synced whether or not the ack is enabled');
+        AcctSeed__Cash_Disbursement__c cd = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c
+            WHERE AcctSeed__ExtId__c = 'ramp-reimb-paid-1:cd'
+        ];
+        System.assertEquals('Synced_To_Ramp', cd.Ramp_Sync_Status__c);
+    }
+
+    @IsTest
+    static void syncPage_ackFails_downgradesPayableAndCD() {
+        String email = configureForSync();   // ack enabled
+        Date payDate = [SELECT AcctSeed__Start_Date__c FROM AcctSeed__Accounting_Period__c WHERE AcctSeed__Status__c = 'Open' ORDER BY AcctSeed__Start_Date__c DESC LIMIT 1].AcctSeed__Start_Date__c;
+        Test.setMock(HttpCalloutMock.class, new AckFailMock(email, payDate));
+
+        Test.startTest();
+        RampReimbursementService.syncPage(null);
+        Test.stopTest();
+
+        AcctSeed__Account_Payable__c ap = [
+            SELECT Ramp_Sync_Status__c, Ramp_Sync_Error__c FROM AcctSeed__Account_Payable__c
+            WHERE AcctSeed__ExtId__c = 'ramp-reimb-paid-1'
+        ];
+        System.assertEquals('Failed', ap.Ramp_Sync_Status__c, 'A failed ack downgrades the payable');
+        System.assert(ap.Ramp_Sync_Error__c.contains('500'), 'Error should carry the ack response: ' + ap.Ramp_Sync_Error__c);
+        AcctSeed__Cash_Disbursement__c cd = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c
+            WHERE AcctSeed__ExtId__c = 'ramp-reimb-paid-1:cd'
+        ];
+        System.assertEquals('Failed', cd.Ramp_Sync_Status__c, 'A failed ack downgrades the disbursement too');
+    }
+
+    private class AckFailMock extends BaseMock {
+        private String email;
+        private Date payDate;
+        public AckFailMock(String e, Date d) { this.email = e; this.payDate = d; }
+        protected override HttpResponse api(HttpRequest req, HttpResponse res) {
+            if (req.getEndpoint().contains('/accounting/syncs')) { res.setStatusCode(500); res.setBody('{"error":"boom"}'); }
+            else if (req.getEndpoint().contains('/reimbursements')) { res.setStatusCode(200); res.setBody(reimbursedJson(email, payDate)); }
+            else { res.setStatusCode(404); res.setBody('unexpected ' + req.getEndpoint()); }
+            return res;
+        }
     }
 
     private class ReimbursedMock extends BaseMock {

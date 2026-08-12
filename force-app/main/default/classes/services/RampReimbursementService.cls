@@ -140,21 +140,32 @@ public with sharing class RampReimbursementService {
             }
         }
 
-        // Mark DML-failed payables synchronously so the error queue can surface them.
-        List<AcctSeed__Account_Payable__c> toFail = new List<AcctSeed__Account_Payable__c>();
+        // Record what posted, synchronously — failures so the error queue can
+        // surface them, successes so the status doesn't hang on the ack. The ack is
+        // optional and off by default, so gating "Synced_To_Ramp" on it left every
+        // payable at "Pending" and the home dashboard reporting 0 synced (FS-15109).
+        List<AcctSeed__Account_Payable__c> apStatus = new List<AcctSeed__Account_Payable__c>();
+        List<AcctSeed__Cash_Disbursement__c> cdStatus = new List<AcctSeed__Cash_Disbursement__c>();
         for (RampReimbursementBuilder.ReimbursementBuild rb : build.successful) {
-            if (rb.header.Id == null) continue;
-            String failReason = lineFailure.get(rb.reimbursementId);
+            if (rb.header.Id == null) continue;   // header upsert failed — no record to stamp
+            String failReason = headerFailure.get(rb.reimbursementId);
+            if (failReason == null) failReason = lineFailure.get(rb.reimbursementId);
             if (failReason == null) failReason = cdFailure.get(rb.reimbursementId);
-            if (failReason != null) {
-                toFail.add(new AcctSeed__Account_Payable__c(
-                    Id = rb.header.Id,
-                    Ramp_Sync_Status__c = 'Failed',
-                    Ramp_Sync_Error__c = truncate(failReason, 1000)
+            apStatus.add(new AcctSeed__Account_Payable__c(
+                Id = rb.header.Id,
+                Ramp_Sync_Status__c = (failReason == null) ? 'Synced_To_Ramp' : 'Failed',
+                Ramp_Sync_Error__c = (failReason == null) ? null : truncate(failReason, 1000)
+            ));
+            if (failReason == null && rb.cashDisbursement != null && rb.cashDisbursement.Id != null) {
+                cdStatus.add(new AcctSeed__Cash_Disbursement__c(
+                    Id = rb.cashDisbursement.Id,
+                    Ramp_Sync_Status__c = 'Synced_To_Ramp',
+                    Ramp_Sync_Error__c = null
                 ));
             }
         }
-        if (!toFail.isEmpty()) Database.update(toFail, false);
+        if (!apStatus.isEmpty()) Database.update(apStatus, false);
+        if (!cdStatus.isEmpty()) Database.update(cdStatus, false);
 
         if ((!okSyncs.isEmpty() || !failSyncs.isEmpty()) && RampSyncSettingsService.getSendSyncAck()) {
             postAckAsync(JSON.serialize(okSyncs), JSON.serialize(failSyncs),
@@ -184,26 +195,29 @@ public with sharing class RampReimbursementService {
             errorMessage = 'POST /accounting/syncs (REIMBURSEMENT_SYNC) failed: ' + e.getMessage();
         }
 
-        flip('AP', payableIdsJson, ackSucceeded, errorMessage);
-        flip('CD', cdIdsJson, ackSucceeded, errorMessage);
+        // A successful ack needs no write — syncPage already stamped these
+        // "Synced_To_Ramp" when they posted. Only a failure changes anything.
+        if (ackSucceeded) return;
+        markFailed('AP', payableIdsJson, errorMessage);
+        markFailed('CD', cdIdsJson, errorMessage);
     }
 
-    private static void flip(String objType, String idsJson, Boolean ackSucceeded, String errorMessage) {
+    private static void markFailed(String objType, String idsJson, String errorMessage) {
         Set<Id> ids = new Set<Id>();
         for (Object o : (List<Object>) JSON.deserializeUntyped(idsJson)) if (o != null) ids.add((Id) (String) o);
         if (ids.isEmpty()) return;
         if (objType == 'AP') {
-            List<AcctSeed__Account_Payable__c> recs = [SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Account_Payable__c WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Pending'];
+            List<AcctSeed__Account_Payable__c> recs = [SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Account_Payable__c WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Synced_To_Ramp'];
             for (AcctSeed__Account_Payable__c r : recs) {
-                if (ackSucceeded) { r.Ramp_Sync_Status__c = 'Synced_To_Ramp'; r.Ramp_Sync_Error__c = null; }
-                else { r.Ramp_Sync_Status__c = 'Failed'; r.Ramp_Sync_Error__c = truncate(errorMessage, 1000); }
+                r.Ramp_Sync_Status__c = 'Failed';
+                r.Ramp_Sync_Error__c = truncate(errorMessage, 1000);
             }
             if (!recs.isEmpty()) Database.update(recs, false);
         } else {
-            List<AcctSeed__Cash_Disbursement__c> recs = [SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Pending'];
+            List<AcctSeed__Cash_Disbursement__c> recs = [SELECT Id, Ramp_Sync_Status__c FROM AcctSeed__Cash_Disbursement__c WHERE Id IN :ids AND Ramp_Sync_Status__c = 'Synced_To_Ramp'];
             for (AcctSeed__Cash_Disbursement__c r : recs) {
-                if (ackSucceeded) { r.Ramp_Sync_Status__c = 'Synced_To_Ramp'; r.Ramp_Sync_Error__c = null; }
-                else { r.Ramp_Sync_Status__c = 'Failed'; r.Ramp_Sync_Error__c = truncate(errorMessage, 1000); }
+                r.Ramp_Sync_Status__c = 'Failed';
+                r.Ramp_Sync_Error__c = truncate(errorMessage, 1000);
             }
             if (!recs.isEmpty()) Database.update(recs, false);
         }

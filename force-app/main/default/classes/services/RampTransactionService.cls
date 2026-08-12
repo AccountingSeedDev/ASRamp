@@ -123,7 +123,7 @@ public with sharing class RampTransactionService {
         List<Map<String, Object>> successfulSyncs = new List<Map<String, Object>>();
         List<Map<String, Object>> failedSyncs = new List<Map<String, Object>>();
         Set<Id> jeIdsToFlip = new Set<Id>();
-        List<AcctSeed__Journal_Entry__c> orphanHeaders = new List<AcctSeed__Journal_Entry__c>();
+        List<AcctSeed__Journal_Entry__c> statusUpdates = new List<AcctSeed__Journal_Entry__c>();
 
         // Build-time failures (bad date, no period, unresolved GL) — never persisted.
         for (String txnId : build.failed.keySet()) {
@@ -160,11 +160,19 @@ public with sharing class RampTransactionService {
 
             if (jeb.header.Id != null) {
                 if (anySuccessInGroup) {
-                    // Leave Ramp_Sync_Status__c at "Pending"; the @future ack flips it.
+                    // The Journal Entry is posted, so record that now instead of
+                    // waiting on the ack. Send_Sync_Ack__c is off by default, so
+                    // gating the status on the ack left every JE at "Pending" and
+                    // the home dashboard reporting 0 synced (FS-15109).
+                    statusUpdates.add(new AcctSeed__Journal_Entry__c(
+                        Id = jeb.header.Id,
+                        Ramp_Sync_Status__c = 'Synced_To_Ramp',
+                        Ramp_Sync_Error__c = null
+                    ));
                     jeIdsToFlip.add(jeb.header.Id);
                 } else {
                     // Header persisted but every line failed — mark it Failed now.
-                    orphanHeaders.add(new AcctSeed__Journal_Entry__c(
+                    statusUpdates.add(new AcctSeed__Journal_Entry__c(
                         Id = jeb.header.Id,
                         Ramp_Sync_Status__c = 'Failed',
                         Ramp_Sync_Error__c = truncate('All transaction lines failed to upsert', 1000)
@@ -173,8 +181,8 @@ public with sharing class RampTransactionService {
             }
         }
 
-        if (!orphanHeaders.isEmpty()) {
-            Database.update(orphanHeaders, false);
+        if (!statusUpdates.isEmpty()) {
+            Database.update(statusUpdates, false);
         }
 
         // Success is counted, not inferred. Anything fetched that produced neither a
@@ -192,7 +200,8 @@ public with sharing class RampTransactionService {
         // 6. Fire the /accounting/syncs POST async so it runs after this
         //    transaction's DML commits — Salesforce forbids callouts after DML.
         //    Skippable via Send_Sync_Ack__c so transactions can be left
-        //    SYNC_READY in Ramp for repeatable testing; JEs then stay "Pending".
+        //    SYNC_READY in Ramp for repeatable testing; the JEs are already marked
+        //    "Synced_To_Ramp" above either way.
         if ((!successfulSyncs.isEmpty() || !failedSyncs.isEmpty()) && RampSyncSettingsService.getSendSyncAck()) {
             postSyncAcksAsync(
                 JSON.serialize(successfulSyncs),
@@ -205,8 +214,9 @@ public with sharing class RampTransactionService {
     }
 
     /**
-     * @description Async ack — POSTs /accounting/syncs and flips the grouped JE
-     * headers from "Pending" to "Synced_To_Ramp" or "Failed".
+     * @description Async ack — POSTs /accounting/syncs. The grouped JE headers are
+     * already "Synced_To_Ramp" (stamped when they posted), so this only downgrades
+     * them to "Failed" when the ack doesn't land and Ramp is left unaware of them.
      */
     @future(callout=true)
     @TestVisible
@@ -236,7 +246,11 @@ public with sharing class RampTransactionService {
             errorMessage = 'POST /accounting/syncs failed: ' + e.getMessage();
         }
 
-        // Flip the grouped JE headers we acked as successful.
+        // Nothing to do on success — the JEs were stamped "Synced_To_Ramp" when they
+        // posted. Only a failed ack changes anything: Ramp doesn't know about these
+        // Journal Entries, so surface that on the records.
+        if (ackSucceeded) return;
+
         List<Object> rawIds = (List<Object>) JSON.deserializeUntyped(jeIdsJson);
         Set<Id> jeIds = new Set<Id>();
         for (Object o : rawIds) {
@@ -247,16 +261,11 @@ public with sharing class RampTransactionService {
         List<AcctSeed__Journal_Entry__c> jes = [
             SELECT Id, Ramp_Sync_Status__c
             FROM AcctSeed__Journal_Entry__c
-            WHERE Id IN :jeIds AND Ramp_Sync_Status__c = 'Pending'
+            WHERE Id IN :jeIds AND Ramp_Sync_Status__c = 'Synced_To_Ramp'
         ];
         for (AcctSeed__Journal_Entry__c je : jes) {
-            if (ackSucceeded) {
-                je.Ramp_Sync_Status__c = 'Synced_To_Ramp';
-                je.Ramp_Sync_Error__c = null;
-            } else {
-                je.Ramp_Sync_Status__c = 'Failed';
-                je.Ramp_Sync_Error__c = truncate(errorMessage, 1000);
-            }
+            je.Ramp_Sync_Status__c = 'Failed';
+            je.Ramp_Sync_Error__c = truncate(errorMessage, 1000);
         }
         if (!jes.isEmpty()) {
             Database.update(jes, false);

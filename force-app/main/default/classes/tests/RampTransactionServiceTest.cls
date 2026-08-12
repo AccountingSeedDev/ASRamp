@@ -91,10 +91,54 @@ private class RampTransactionServiceTest {
             WHERE AcctSeed__ExtId__c = :dailyKeyForMock()
         ];
         System.assertEquals(1, jes.size());
-        System.assertEquals('Synced_To_Ramp', jes[0].Ramp_Sync_Status__c, 'Should be flipped to synced after ack');
+        System.assertEquals('Synced_To_Ramp', jes[0].Ramp_Sync_Status__c, 'A posted JE is marked synced');
         System.assertEquals(null, jes[0].Ramp_Sync_Error__c);
         System.assertEquals(2, jes[0].AcctSeed__Journal_Entry_Lines__r.size(), 'One debit + one credit');
         System.assertEquals('ramp-txn-success-1:cr', jes[0].AcctSeed__Journal_Entry_Lines__r[0].AcctSeed__ExtId__c);
+    }
+
+    @IsTest
+    static void syncPage_ackDisabled_stillMarksJESynced() {
+        String glUuid = configureForSync();
+        RampSyncSettingsService.overrideSettings = new Ramp_Sync_Settings__mdt(
+            Default_Ledger__c = 'Ledger-TEST',
+            Default_JE_Status__c = 'In Process',
+            Send_Sync_Ack__c = false
+        );
+        Test.setMock(HttpCalloutMock.class, new SinglePageMock(glUuid));
+
+        Test.startTest();
+        RampTransactionService.PageResult result = RampTransactionService.syncPage(null);
+        Test.stopTest();
+
+        System.assertEquals(1, result.journalEntriesCreated, 'Errors: ' + result.errorMessages);
+        // FS-15109: Send_Sync_Ack__c is off by default, so gating the status on the
+        // ack left every JE at "Pending" and the dashboard reporting 0 synced.
+        AcctSeed__Journal_Entry__c je = [
+            SELECT Ramp_Sync_Status__c FROM AcctSeed__Journal_Entry__c
+            WHERE AcctSeed__ExtId__c = :dailyKeyForMock()
+        ];
+        System.assertEquals('Synced_To_Ramp', je.Ramp_Sync_Status__c,
+            'A posted JE is synced whether or not the ack is enabled');
+    }
+
+    @IsTest
+    static void syncPage_ackFails_downgradesJEToFailed() {
+        String glUuid = configureForSync();   // ack enabled
+        Test.setMock(HttpCalloutMock.class, new AckFailMock(glUuid));
+
+        Test.startTest();
+        RampTransactionService.syncPage(null);
+        Test.stopTest();
+
+        AcctSeed__Journal_Entry__c je = [
+            SELECT Ramp_Sync_Status__c, Ramp_Sync_Error__c FROM AcctSeed__Journal_Entry__c
+            WHERE AcctSeed__ExtId__c = :dailyKeyForMock()
+        ];
+        System.assertEquals('Failed', je.Ramp_Sync_Status__c,
+            'Ramp never learned about this JE, so the record must say so');
+        System.assert(je.Ramp_Sync_Error__c.contains('500'),
+            'Error should carry the ack response: ' + je.Ramp_Sync_Error__c);
     }
 
     @IsTest
@@ -293,6 +337,25 @@ private class RampTransactionServiceTest {
         protected override HttpResponse respondToApi(HttpRequest req, HttpResponse res) {
             res.setStatusCode(200);
             res.setBody('{"data":[],"page":{"next":null}}');
+            return res;
+        }
+    }
+
+    /** One good page, but /accounting/syncs rejects the ack. */
+    private class AckFailMock extends BaseRampMock {
+        private String glUuid;
+        public AckFailMock(String glUuid) { this.glUuid = glUuid; }
+        protected override HttpResponse respondToApi(HttpRequest req, HttpResponse res) {
+            if (req.getEndpoint().contains('/accounting/syncs')) {
+                res.setStatusCode(500);
+                res.setBody('{"error":"boom"}');
+            } else if (req.getEndpoint().contains('/transactions')) {
+                res.setStatusCode(200);
+                res.setBody(buildTransactionsResponse(glUuid, 'ramp-txn-success-1', null));
+            } else {
+                res.setStatusCode(404);
+                res.setBody('unexpected ' + req.getEndpoint());
+            }
             return res;
         }
     }
