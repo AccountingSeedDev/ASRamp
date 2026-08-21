@@ -84,11 +84,15 @@ public with sharing class RampAccountingFieldService {
             String fieldId = generateDeterministicUUID(fieldName);
 
             // Build request body for custom field creation
+            // is_splittable=true is required so the field can be coded on bill/transaction
+            // split lines; without it Ramp creates a bill/transaction-level-only field and
+            // the value never reaches the individual line items (AP lines come through blank).
             Map<String, Object> requestBody = new Map<String, Object>{
                 'id' => fieldId,
                 'name' => fieldName,
                 'input_type' => 'SINGLE_CHOICE',
-                'accounting_connection_id' => accountingConnectionId
+                'accounting_connection_id' => accountingConnectionId,
+                'is_splittable' => true
             };
 
             String body = JSON.serialize(requestBody);
@@ -143,6 +147,45 @@ public with sharing class RampAccountingFieldService {
         } catch (Exception e) {
             return 'Error: ' + e.getMessage();
         }
+    }
+
+    /**
+     * @description Marks an existing custom accounting field as splittable so it can be
+     * coded on bill/transaction line items instead of only at the header level. Use this to
+     * repair fields that were created before is_splittable was set on creation.
+     * Call from Anonymous Apex: System.debug(RampAccountingFieldService.makeFieldSplittable('field-uuid'));
+     * @param fieldId The Ramp field ID to update
+     * @return String Result message
+     */
+    public static String makeFieldSplittable(String fieldId) {
+        try {
+            String body = JSON.serialize(new Map<String, Object>{ 'is_splittable' => true });
+
+            HttpResponse res = RampAPIService.patch('/developer/v1/accounting/fields/' + fieldId, body);
+            return 'Status: ' + res.getStatusCode() + '\nBody:\n' + res.getBody();
+        } catch (Exception e) {
+            return 'Error: ' + e.getMessage();
+        }
+    }
+
+    /**
+     * @description Repairs the GL Account Variable 1-4 fields for orgs whose fields were
+     * created before is_splittable was set, so previously-header-level-only values can now
+     * be coded on bill/transaction line items. Field IDs are deterministic from the field
+     * name, so no lookup is needed.
+     * Call from Anonymous Apex: System.debug(RampAccountingFieldService.repairVariableFieldsSplittable());
+     * @return String Summary of repair results
+     */
+    public static String repairVariableFieldsSplittable() {
+        List<String> results = new List<String>();
+
+        for (Integer i = 1; i <= 4; i++) {
+            String fieldName = 'GL Account Variable ' + i;
+            String fieldId = generateDeterministicUUID(fieldName);
+            results.add(fieldName + ': ' + makeFieldSplittable(fieldId));
+        }
+
+        return String.join(results, '\n');
     }
 
     /**

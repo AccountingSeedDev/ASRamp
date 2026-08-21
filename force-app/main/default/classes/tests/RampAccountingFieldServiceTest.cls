@@ -43,6 +43,49 @@ private class RampAccountingFieldServiceTest {
     }
 
     @IsTest
+    static void testCreateVariableField_SendsSplittableFlag() {
+        RampAccountingFieldMockSuccess mock = new RampAccountingFieldMockSuccess();
+
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, mock);
+
+        RampAccountingFieldService.syncAccountingVariablesToRamp(TEST_CONNECTION_ID);
+
+        Test.stopTest();
+
+        System.assert(
+            mock.lastRequestBody != null && mock.lastRequestBody.contains('"is_splittable":true'),
+            'Field creation request should mark the field as splittable so it can be coded on line items'
+        );
+    }
+
+    @IsTest
+    static void testMakeFieldSplittable_Success() {
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockSuccess());
+
+        String result = RampAccountingFieldService.makeFieldSplittable('test-field-id');
+
+        Test.stopTest();
+
+        System.assert(result.contains('Status: 201') || result.contains('Status: 200'), 'Should return a success status: ' + result);
+    }
+
+    @IsTest
+    static void testRepairVariableFieldsSplittable_Success() {
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockSuccess());
+
+        String result = RampAccountingFieldService.repairVariableFieldsSplittable();
+
+        Test.stopTest();
+
+        System.assert(result.contains('GL Account Variable 1'), 'Result should mention Variable 1');
+        System.assert(result.contains('GL Account Variable 4'), 'Result should mention Variable 4');
+        System.assert(result.contains('Status: 200'), 'Result should indicate the PATCH calls succeeded');
+    }
+
+    @IsTest
     static void testGetCustomFields() {
         Test.startTest();
         Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockSuccess());
@@ -71,6 +114,7 @@ private class RampAccountingFieldServiceTest {
      */
     private class RampAccountingFieldMockSuccess implements HttpCalloutMock {
         private Integer callCount = 0;
+        public String lastRequestBody;
 
         public HTTPResponse respond(HTTPRequest req) {
             HTTPResponse res = new HTTPResponse();
@@ -85,8 +129,14 @@ private class RampAccountingFieldServiceTest {
 
             if (req.getMethod() == 'POST') {
                 // Create field response
+                lastRequestBody = req.getBody();
                 res.setStatusCode(201);
                 res.setBody('{"id": "field_' + callCount++ + '", "name": "Test Field"}');
+            } else if (req.getMethod() == 'PATCH') {
+                // Update field response
+                lastRequestBody = req.getBody();
+                res.setStatusCode(200);
+                res.setBody('{"id": "test-field-id", "name": "Test Field", "is_splittable": true}');
             } else if (req.getMethod() == 'GET') {
                 // Get fields response
                 res.setStatusCode(200);
