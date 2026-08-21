@@ -302,6 +302,82 @@ private class RampBillBuilderTest {
             'Merchant selection must not be treated as a deleted GL Variable: ' + r.failed);
     }
 
+    @IsTest
+    static void build_unstampedGLVariable_resolvesViaExternalId() {
+        configure();
+        Id vId = vendorAccount('Unstamped Vendor');
+
+        // An active variable whose Ramp option id was never stamped back — the state any
+        // gap in the field-options sync leaves behind. The option id can't be matched, so
+        // this used to drop the coding and sync the Payable Line with the variable blank.
+        AcctSeed__Accounting_Variable__c av = new AcctSeed__Accounting_Variable__c(
+            Name = 'Unstamped Program',
+            AcctSeed__Type__c = 'GL Account Variable 1',
+            AcctSeed__Active__c = true
+        );
+        insert av;
+
+        RampBillBuilder.Bill b = sampleBill('bill-unstamped', 5000, null, vId);
+        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{
+            varSelection('ramp-option-never-stamped', av.Id, 'Unstamped Program')
+        };
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(), 'Bill should build: ' + r.failed);
+        System.assertEquals(av.Id, r.successful[0].lines[0].AcctSeed__GL_Account_Variable_1__c,
+            'Variable should resolve through external_id when the option id was never stamped');
+    }
+
+    @IsTest
+    static void build_unmappableGLVariable_failsBill() {
+        configure();
+        Id vId = vendorAccount('Unmappable Vendor');
+
+        // A GL Account Variable selection that maps to nothing at all — no stamped option
+        // and an external_id that is not an Accounting Variable. Losing the coding silently
+        // is worse than failing: the payable would post to the wrong cost centre.
+        RampBillBuilder.Bill b = sampleBill('bill-unmappable', 5000, null, vId);
+        RampBillBuilder.BillFieldSelection sel = varSelection('ramp-option-orphan', null, 'Orphan Program');
+        sel.external_id = null;
+        sel.external_code = null;
+        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{ sel };
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(0, r.successful.size(), 'Bill with an unmappable GL variable should fail');
+        System.assert(r.failed.get('bill-unmappable').contains('does not map to an active Accounting Variable'),
+            'Error should name the unmapped variable: ' + r.failed.get('bill-unmappable'));
+    }
+
+    @IsTest
+    static void build_nonVariableCustomField_doesNotFailBill() {
+        configure();
+        Id vId = vendorAccount('Other Field Vendor');
+
+        // Ramp-native fields the customer set up themselves (Check Delivery Method and the
+        // like) route into the variable bucket too and must stay ignorable.
+        RampBillBuilder.Bill b = sampleBill('bill-otherfield', 5000, null, vId);
+        RampBillBuilder.BillFieldSelection sel = new RampBillBuilder.BillFieldSelection();
+        sel.id = 'ramp-option-check-delivery';
+        sel.name = 'Mail';
+        sel.category_info = new RampBillBuilder.BillField();
+        sel.category_info.type = 'OTHER';
+        sel.category_info.name = 'Check Delivery Method';
+        b.line_items[0].accounting_field_selections = new List<RampBillBuilder.BillFieldSelection>{ sel };
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(),
+            'A field that is not one of ours must not fail the bill: ' + r.failed);
+    }
+
     /**
      * A GL Account Variable selection as Ramp actually returns it: id is the Ramp
      * option uuid, external_id is the Accounting Seed record Id, and category_info.type

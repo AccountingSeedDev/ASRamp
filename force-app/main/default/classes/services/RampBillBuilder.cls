@@ -152,6 +152,9 @@ public with sharing class RampBillBuilder {
         }
         Map<String, Id> glByUuid = resolveGLs(glUuids);
         Map<String, AcctSeed__Accounting_Variable__c> varByUuid = resolveVariables(varUuids);
+        // Second chance for options we never stamped: the selection carries the Accounting
+        // Variable Id in external_id, so an unstamped option is still resolvable.
+        varByUuid.putAll(resolveVariablesByExternalId(bills, varByUuid.keySet()));
         Set<String> unusableVarUuids = findInactiveVarUuids(varUuids, varByUuid.keySet());
         unusableVarUuids.addAll(findDeletedVarUuids(bills, varByUuid.keySet()));
 
@@ -338,7 +341,21 @@ public with sharing class RampBillBuilder {
                     + ') is no longer available in Accounting Seed — it was deleted or deactivated.'
                     + ' Restore it in Accounting Seed, or recode the bill in Ramp, before syncing.');
             }
-            if (String.isBlank(sel.id) || !varByUuid.containsKey(sel.id)) continue;
+            if (String.isBlank(sel.id)) continue;
+            if (!varByUuid.containsKey(sel.id)) {
+                // Nothing in Accounting Seed maps to this option. When it belongs to one of
+                // our own GL Account Variable 1-4 fields that is a real coding loss, so fail
+                // the bill rather than syncing a Payable Line with the variable blank — the
+                // card and reimbursement builders already draw that line the same way.
+                // Other Ramp field types (Check Delivery Method, customer-native fields) are
+                // legitimately ignored.
+                if (isGLVariableField(sel)) {
+                    throw new BuildException('GL Variable "' + (sel.name != null ? sel.name : sel.id)
+                        + '" (option id: ' + sel.id + ') does not map to an active Accounting Variable.'
+                        + ' Re-run the accounting variable sync, or recode the bill in Ramp, before syncing.');
+                }
+                continue;
+            }
             String t = varByUuid.get(sel.id).AcctSeed__Type__c;
             if (t == 'GL Account Variable 1' && line.AcctSeed__GL_Account_Variable_1__c == null) line.AcctSeed__GL_Account_Variable_1__c = varByUuid.get(sel.id).Id;
             else if (t == 'GL Account Variable 2' && line.AcctSeed__GL_Account_Variable_2__c == null) line.AcctSeed__GL_Account_Variable_2__c = varByUuid.get(sel.id).Id;
@@ -350,6 +367,12 @@ public with sharing class RampBillBuilder {
     // --------------------------------------------------------------------
     //  Resolution helpers
     // --------------------------------------------------------------------
+    /** True when the selection belongs to one of the GL Account Variable 1-4 fields we sync. */
+    private static Boolean isGLVariableField(BillFieldSelection sel) {
+        String fieldName = (sel.category_info != null) ? sel.category_info.name : null;
+        return fieldName != null && fieldName.startsWith('GL Account Variable');
+    }
+
     private static void collectUuids(List<BillFieldSelection> selections, Set<String> glUuids, Set<String> varUuids) {
         if (selections == null) return;
         for (BillFieldSelection sel : selections) {
@@ -389,6 +412,59 @@ public with sharing class RampBillBuilder {
             WHERE Ramp_Field_Option_Id__c IN :uuids AND AcctSeed__Active__c = true
         ]) {
             result.put(v.Ramp_Field_Option_Id__c, v);
+        }
+        return result;
+    }
+
+    /**
+     * Recover variable selections whose Ramp option id was never stamped onto the
+     * Accounting Variable. Ramp_Field_Option_Id__c is stamped by RampFieldOptionsSyncBatch,
+     * and any gap there (a rejected all-or-nothing POST, a truncated lookup, options created
+     * against an earlier connection) used to make the selection unresolvable — so the
+     * variable was dropped and the Payable Line synced blank with no error anywhere.
+     *
+     * The option carries the Accounting Seed record Id in external_id, which is the same
+     * key the deleted-variable check already relies on, so resolve through that instead.
+     * Narrowed by the Accounting Variable key prefix because merchant/vendor selections put
+     * an Account Id in external_id too.
+     *
+     * @return Map keyed by Ramp option id (matching resolveVariables) for the selections
+     *         that were not already resolved
+     */
+    private static Map<String, AcctSeed__Accounting_Variable__c> resolveVariablesByExternalId(
+        List<Bill> bills, Set<String> alreadyResolved
+    ) {
+        Map<String, AcctSeed__Accounting_Variable__c> result = new Map<String, AcctSeed__Accounting_Variable__c>();
+        if (String.isBlank(VARIABLE_KEY_PREFIX)) return result;
+
+        // Accounting Variable Id -> the Ramp option ids that pointed at it.
+        Map<Id, Set<String>> uuidsByVariableId = new Map<Id, Set<String>>();
+        for (Bill b : bills) {
+            List<BillFieldSelection> selections = new List<BillFieldSelection>();
+            if (b.accounting_field_selections != null) selections.addAll(b.accounting_field_selections);
+            if (b.line_items != null) {
+                for (BillLineItem li : b.line_items) {
+                    if (li.accounting_field_selections != null) selections.addAll(li.accounting_field_selections);
+                }
+            }
+            for (BillFieldSelection sel : selections) {
+                if (String.isBlank(sel.id) || alreadyResolved.contains(sel.id)) continue;
+                String t = (sel.category_info != null) ? sel.category_info.type : null;
+                if (t == 'GL_ACCOUNT') continue;
+                Id variableId = toVariableId(sel.external_id);
+                if (variableId == null) continue;
+                if (!uuidsByVariableId.containsKey(variableId)) uuidsByVariableId.put(variableId, new Set<String>());
+                uuidsByVariableId.get(variableId).add(sel.id);
+            }
+        }
+        if (uuidsByVariableId.isEmpty()) return result;
+
+        for (AcctSeed__Accounting_Variable__c v : [
+            SELECT Id, AcctSeed__Type__c, Ramp_Field_Option_Id__c
+            FROM AcctSeed__Accounting_Variable__c
+            WHERE Id IN :uuidsByVariableId.keySet() AND AcctSeed__Active__c = true
+        ]) {
+            for (String uuid : uuidsByVariableId.get(v.Id)) result.put(uuid, v);
         }
         return result;
     }
