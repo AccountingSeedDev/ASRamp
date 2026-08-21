@@ -188,6 +188,30 @@ private class RampAccountingFieldServiceTest {
     }
 
     @IsTest
+    static void testVariableTypeForFieldId() {
+        // The Configuration tab keys Ramp's field list on this rather than on the field name,
+        // which an admin can rename from either side.
+        RampAccountingFieldMockSuccess mock = new RampAccountingFieldMockSuccess();
+
+        Test.startTest();
+        Test.setMock(HttpCalloutMock.class, mock);
+        RampAccountingFieldService.syncAccountingVariablesToRamp(TEST_CONNECTION_ID);
+        Test.stopTest();
+
+        // The mock echoes the id we sent, so pull a real deterministic id out of the request.
+        Map<String, Object> sent = (Map<String, Object>) JSON.deserializeUntyped(mock.lastRequestBody);
+        String sentId = (String) sent.get('id');
+        String sentName = (String) sent.get('name');
+
+        System.assertEquals(sentName, RampAccountingFieldService.variableTypeForFieldId(sentId),
+            'A deterministic id should resolve back to its variable type');
+        System.assertEquals(null, RampAccountingFieldService.variableTypeForFieldId('Location'),
+            'A Ramp-native field id is not one of ours');
+        System.assertEquals(null, RampAccountingFieldService.variableTypeForFieldId(null),
+            'A blank id should not resolve');
+    }
+
+    @IsTest
     static void testGetCustomFields() {
         Test.startTest();
         Test.setMock(HttpCalloutMock.class, new RampAccountingFieldMockSuccess());

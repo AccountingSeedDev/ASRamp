@@ -273,10 +273,22 @@ public with sharing class RampConfigurationController {
                     Map<String, Object> fieldData = (Map<String, Object>) field;
                     Object isActive = fieldData.get('is_active');
                     if (isActive == null || isActive == true) {
-                        String name = (String) fieldData.get('name');
                         String rampId = (String) fieldData.get('ramp_id');
-                        if (String.isNotBlank(name) && String.isNotBlank(rampId)) {
-                            fieldMap.put(name, rampId);
+                        // Match on the deterministic external id we created the field with,
+                        // not on Ramp's name: the name is editable both in Ramp and in the
+                        // Custom Fields table on the Configuration tab, and a rename used to
+                        // strand the whole variable type on 'No Ramp field ID found' — its
+                        // options never reach Ramp, so nobody can code that variable at all.
+                        String variableType = RampAccountingFieldService.variableTypeForFieldId(
+                            (String) fieldData.get('id')
+                        );
+                        if (String.isBlank(variableType)) {
+                            // Not one of ours (or created before ids were deterministic) —
+                            // fall back to the name so existing connections keep working.
+                            variableType = (String) fieldData.get('name');
+                        }
+                        if (String.isNotBlank(variableType) && String.isNotBlank(rampId)) {
+                            fieldMap.put(variableType, rampId);
                         }
                     }
                 }
