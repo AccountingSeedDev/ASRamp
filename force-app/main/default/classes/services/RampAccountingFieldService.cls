@@ -110,6 +110,25 @@ public with sharing class RampAccountingFieldService {
     }
 
     /**
+     * @description The GL Account Variable type a Ramp custom field id belongs to, or null
+     * when the id is not one this package created. Lets callers key Ramp's field list on the
+     * id we control rather than on Ramp's name, which an admin can rename from either side.
+     * @param externalFieldId The 'id' Ramp echoes back for a custom field
+     * @return String e.g. 'GL Account Variable 2', or null when the id is not one of ours
+     */
+    public static String variableTypeForFieldId(String externalFieldId) {
+        if (String.isBlank(externalFieldId)) return null;
+
+        for (Integer i = 1; i <= 4; i++) {
+            String fieldName = 'GL Account Variable ' + i;
+            if (generateDeterministicUUID(fieldName).equalsIgnoreCase(externalFieldId)) {
+                return fieldName;
+            }
+        }
+        return null;
+    }
+
+    /**
      * @description Creates a custom field in Ramp and reports back what Ramp stored.
      *
      * is_splittable is what lets the field annotate split line items; Ramp defaults it to
