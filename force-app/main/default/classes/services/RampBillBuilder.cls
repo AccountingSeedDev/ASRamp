@@ -308,7 +308,11 @@ public with sharing class RampBillBuilder {
         AcctSeed__Account_Payable_Line__c line = new AcctSeed__Account_Payable_Line__c();
         line.AcctSeed__ExtId__c = b.id + ':L' + ordinal;
         line.AcctSeed__Date__c = billDate;
-        line.AcctSeed__Description__c = String.isNotBlank(memo) ? memo : b.memo;
+        String lineDescription = String.isNotBlank(memo) ? memo : b.memo;
+        line.AcctSeed__Description__c = lineDescription != null && lineDescription.length() > 255
+            ? lineDescription.substring(0, 255)
+            : lineDescription;
+        line.Ramp_Description__c = lineDescription;
         line.AcctSeed__Amount__c = amount;
 
         String glUuid = findSelectionId(lineSelections, 'GL_ACCOUNT');
