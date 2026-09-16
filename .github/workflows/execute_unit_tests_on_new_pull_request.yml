@@ -146,12 +146,32 @@ jobs:
           echo "created=true" >> "$GITHUB_OUTPUT"
 
           # Install the Accounting Seed Financial Suite managed-package dependency.
+          # `sf package install` exits non-zero when its poll window elapses even
+          # though the install is still running server-side, so a timeout here is
+          # not fatal — the check below decides.
           sf package install \
             --package "$AS_PACKAGE_VERSION_ID" \
             --target-org asramp_test \
-            --wait 30 \
+            --wait 60 \
             --publish-wait 30 \
-            --no-prompt
+            --no-prompt || echo "Install polling ended non-zero; verifying install state below."
+
+          # Deploying before the managed package is live fails with
+          # INVALID_CROSS_REFERENCE_KEY on ASRamp's AcctSeed__ references, so
+          # confirm the version is actually installed first.
+          DEADLINE=$((SECONDS + 900))
+          until sf package installed list --target-org asramp_test --json \
+            | jq -e --arg id "$AS_PACKAGE_VERSION_ID" \
+                'any(.result[]; .SubscriberPackageVersionId == $id)' > /dev/null; do
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "ERROR: Accounting Seed package $AS_PACKAGE_VERSION_ID did not finish installing." >&2
+              sf package installed list --target-org asramp_test || true
+              exit 1
+            fi
+            echo "Waiting for Accounting Seed package install to finish..."
+            sleep 30
+          done
+          echo "Accounting Seed package $AS_PACKAGE_VERSION_ID is installed."
 
           # Deploy ASRamp source.
           sf project deploy start \
