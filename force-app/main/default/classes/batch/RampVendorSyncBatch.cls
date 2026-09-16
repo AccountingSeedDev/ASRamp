@@ -19,6 +19,17 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
     @TestVisible
     private List<String> errors = new List<String>();
 
+    // Vendors POSTed to Ramp whose Ramp_Vendor_Id__c could not be written back
+    // locally (org validation rule, FLS, etc.). They exist on Ramp's side but
+    // carry no local pointer, so finish() calls them out as needing attention.
+    @TestVisible
+    private Integer unlinkedCount = 0;
+
+    // Populated when start() cannot build its query locator, so finish() can
+    // still report the failure instead of the run vanishing without a trace.
+    @TestVisible
+    private String startError;
+
     // Lazily-populated map of (SF Account Id -> Ramp vendor UUID) for vendors
     // that already exist on Ramp's side. Used to skip duplicate POSTs after a
     // tenant switch or local Ramp_Vendor_Id__c clear.
@@ -49,11 +60,23 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
      * @description Start method - query Accounts that are Vendors
      */
     public Database.QueryLocator start(Database.BatchableContext bc) {
-        return Database.getQueryLocator([
-            SELECT Id, Name, AccountNumber, Ramp_Vendor_Id__c
-            FROM Account
-            WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
-        ]);
+        // An exception thrown out of start() kills the job before finish() runs,
+        // so no Automated Job Result is ever written and the sync looks like it
+        // silently did nothing (FS-15366: AccountNumber not readable by the
+        // running user). Catch it, remember it, and hand back an empty locator
+        // so finish() still records the failure where an admin will see it.
+        try {
+            return Database.getQueryLocator([
+                SELECT Id, Name, AccountNumber, Ramp_Vendor_Id__c
+                FROM Account
+                WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
+            ]);
+        } catch (Exception e) {
+            startError = e.getMessage();
+            errorCount++;
+            errors.add('Unable to query vendor Accounts: ' + e.getMessage());
+            return Database.getQueryLocator([SELECT Id FROM Account WHERE Id = NULL]);
+        }
     }
 
     /**
@@ -118,10 +141,11 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
         // createVendorsAndReturnStamped does POST + GET callouts and returns
         // the Account records to stamp — DML happens below after all callouts.
         List<Account> newlyStamped = new List<Account>();
+        Integer postedToRamp = 0;
         if (!toCreate.isEmpty()) {
             try {
                 newlyStamped = createVendorsAndReturnStamped(toCreate);
-                createdCount += toCreate.size();
+                postedToRamp = toCreate.size();
             } catch (Exception e) {
                 errorCount++;
                 errors.add('Create batch: ' + e.getMessage());
@@ -134,8 +158,27 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
             restoredCount += updateAllowingPartialSuccess(toRestore, 'Restore');
         }
 
-        if (!newlyStamped.isEmpty()) {
-            updateAllowingPartialSuccess(newlyStamped, 'Stamp new vendor');
+        // Count a vendor as "created" only once its Ramp_Vendor_Id__c is actually
+        // written back. Counting the whole POST batch up front (FS-15366) both
+        // overstated Created and double-counted the rows that later failed to
+        // stamp, so Processed exceeded the number of Accounts in the run.
+        if (postedToRamp > 0) {
+            Integer stamped = newlyStamped.isEmpty()
+                ? 0
+                : updateAllowingPartialSuccess(newlyStamped, 'Stamp new vendor');
+            createdCount += stamped;
+
+            // Rows the follow-up read never returned a ramp_id for. They were
+            // POSTed, so the next run finds them via fetchExistingRampVendors()
+            // and re-stamps them through the restore path — no duplicate POST.
+            Integer noRampIdReturned = postedToRamp - newlyStamped.size();
+            if (noRampIdReturned > 0) {
+                errorCount += noRampIdReturned;
+                errors.add('Create: ' + noRampIdReturned + ' vendor(s) were sent to Ramp but no ramp_id ' +
+                    'came back on the follow-up read.');
+            }
+
+            unlinkedCount += (postedToRamp - stamped);
         }
     }
 
@@ -243,8 +286,20 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
 
         String notes = 'Created: ' + createdCount + ' · Updated: ' + updatedCount +
                        ' · Restored: ' + restoredCount + ' · Errors: ' + errorCount;
-        if (processed == 0) {
+        if (processed == 0 && String.isBlank(startError)) {
             notes += '\nNo vendor Accounts (Accounting Type Vendor / Customer and Vendor) were found to sync.';
+        }
+        if (String.isNotBlank(startError)) {
+            notes = RampJobResultLogger.appendNote(notes,
+                'The run could not read vendor Accounts, so nothing was synced. Confirm the user running ' +
+                'the sync has Read access to Account.Name, Account.AccountNumber and Account.Ramp_Vendor_Id__c ' +
+                '(the Ramp Admin permission set grants these).');
+        }
+        if (unlinkedCount > 0) {
+            notes = RampJobResultLogger.appendNote(notes,
+                unlinkedCount + ' vendor(s) were created in Ramp but could not be linked back to their ' +
+                'Salesforce Account. Resolve the record errors below, then re-run — the sync re-links ' +
+                'existing Ramp vendors instead of creating duplicates.');
         }
         if (!errors.isEmpty()) {
             notes = RampJobResultLogger.appendNote(notes, 'Error details:\n' + String.join(errors, '\n'));

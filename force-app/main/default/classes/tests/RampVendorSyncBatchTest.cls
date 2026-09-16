@@ -257,6 +257,102 @@ private class RampVendorSyncBatchTest {
     }
 
     @IsTest
+    static void testFinish_startFailureStillRecordsAJobResult() {
+        // A start() failure (FS-15366: AccountNumber not readable) used to kill
+        // the job before finish(), so no Automated Job Result was written at all
+        // and the sync looked like it silently did nothing.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            RampVendorSyncBatch batch = new RampVendorSyncBatch(TEST_CONNECTION_ID);
+            batch.startError = 'No such column \'AccountNumber\' on entity \'Account\'.';
+            batch.errorCount = 1;
+            batch.errors.add('Unable to query vendor Accounts: No such column');
+
+            Test.startTest();
+            batch.finish(null);
+            Test.stopTest();
+
+            AcctSeed__Automated_Job_Results__c ajr = [
+                SELECT AcctSeed__Processed__c, AcctSeed__Failed__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_VENDOR_SYNC
+                LIMIT 1
+            ];
+            System.assertEquals(1, ajr.AcctSeed__Failed__c, 'The start() failure must be reported as a failure');
+            System.assert(ajr.AcctSeed__Notes__c.contains('could not read vendor Accounts'),
+                'Notes should explain the run read no Accounts: ' + ajr.AcctSeed__Notes__c);
+            System.assert(ajr.AcctSeed__Notes__c.contains('Ramp Admin'),
+                'Notes should point the admin at the permission set: ' + ajr.AcctSeed__Notes__c);
+            System.assert(!ajr.AcctSeed__Notes__c.contains('No vendor Accounts'),
+                'A read failure must not be reported as "no vendors found"');
+        }
+    }
+
+    @IsTest
+    static void testCreate_vendorsPostedButNotLinkedAreNotCountedAsCreated() {
+        // Ramp accepts the POST but the local stamp does not land (the customer's
+        // 40-character vendor-name validation rule). Counting the whole POST
+        // batch as Created overstated the result and double-counted those rows
+        // as both Created and Errors, so Processed exceeded the Account count.
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            // TestDataFactory seeds its own 'Customer and Vendor' Accounts on top
+            // of this class's, so derive the create-bucket size rather than
+            // hard-coding it.
+            Integer expectedUnlinked = [
+                SELECT COUNT()
+                FROM Account
+                WHERE AcctSeed__Accounting_Type__c IN ('Vendor', 'Customer and Vendor')
+                  AND Ramp_Vendor_Id__c = NULL
+            ];
+
+            Test.startTest();
+            Test.setMock(HttpCalloutMock.class, new RampVendorMockCreateNeverReturnsRampId());
+            Database.executeBatch(new RampVendorSyncBatch(TEST_CONNECTION_ID), 200);
+            Test.stopTest();
+
+            AcctSeed__Automated_Job_Results__c ajr = [
+                SELECT AcctSeed__Processed__c, AcctSeed__Succeeded__c, AcctSeed__Failed__c, AcctSeed__Notes__c
+                FROM AcctSeed__Automated_Job_Results__c
+                WHERE AcctSeed__Schedule_Job_Type__c = :RampJobResultLogger.JOB_VENDOR_SYNC
+                LIMIT 1
+            ];
+
+            System.assert(ajr.AcctSeed__Notes__c.contains('Created: 0'),
+                'A vendor that never got its ramp_id back is not "created": ' + ajr.AcctSeed__Notes__c);
+            System.assertEquals(expectedUnlinked, ajr.AcctSeed__Failed__c,
+                'Every unlinked vendor counts as exactly one failure: ' + ajr.AcctSeed__Notes__c);
+            System.assertEquals(
+                ajr.AcctSeed__Succeeded__c + ajr.AcctSeed__Failed__c,
+                ajr.AcctSeed__Processed__c,
+                'Processed must equal Succeeded + Failed — no row counted twice');
+            System.assert(ajr.AcctSeed__Notes__c.contains('could not be linked'),
+                'Notes must call out the vendors left unlinked in Ramp: ' + ajr.AcctSeed__Notes__c);
+            System.assert(ajr.AcctSeed__Notes__c.contains('duplicates'),
+                'Notes must reassure the admin that re-running is safe: ' + ajr.AcctSeed__Notes__c);
+        }
+    }
+
+    /**
+     * @description POST succeeds but the follow-up read never returns a ramp_id,
+     * mirroring a vendor that exists in Ramp yet cannot be linked locally.
+     */
+    private class RampVendorMockCreateNeverReturnsRampId implements HttpCalloutMock {
+        public HTTPResponse respond(HTTPRequest req) {
+            HTTPResponse res = new HTTPResponse();
+            res.setHeader('Content-Type', 'application/json');
+            res.setStatusCode(200);
+
+            if (req.getEndpoint().contains('/token')) {
+                res.setBody('{"access_token":"tok","token_type":"Bearer","expires_in":3600}');
+            } else if (req.getMethod() == 'GET') {
+                res.setBody('{"data":[],"page":{"next":null}}');
+            } else {
+                res.setBody('{"id":"created"}');
+            }
+            return res;
+        }
+    }
+
+    @IsTest
     static void testExtractErrorDetail_Html404() {
         HTTPResponse res = new HTTPResponse();
         res.setStatusCode(404);

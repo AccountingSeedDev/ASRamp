@@ -3,6 +3,12 @@
  */
 public with sharing class RampConfigurationController {
 
+    // Every sync entry point returns as soon as the job is queued, long before it
+    // runs. The message must not read as a success report (FS-15366: a green
+    // "sync started" toast masked a batch that died in start()).
+    private static final String JOB_QUEUED_HINT =
+        'This confirms the job was queued, not that it succeeded — check the Automated Job Result for the outcome.';
+
     /**
      * @description Wrapper class for credential data
      */
@@ -207,7 +213,8 @@ public with sharing class RampConfigurationController {
             RampFieldOptionsSyncBatch batch = new RampFieldOptionsSyncBatch(connectionId, fieldNameToRampId);
             Id jobId = Database.executeBatch(batch, 50);
 
-            return 'Sync job started. Job ID: ' + jobId + '\nThe job will create new options and update existing ones.';
+            return 'Accounting variable sync queued. Job Id: ' + jobId +
+                '. The job will create new options and update existing ones. ' + JOB_QUEUED_HINT;
         } catch (Exception e) {
             throw new AuraHandledException('Error starting sync job: ' + e.getMessage());
         }
@@ -223,8 +230,8 @@ public with sharing class RampConfigurationController {
         try {
             // RampVendorSyncBatch() resolves the accounting connection itself.
             Id jobId = Database.executeBatch(new RampVendorSyncBatch(), 50);
-            return 'Vendor sync started. Job Id: ' + jobId +
-                '. Creates/updates Ramp vendors from vendor Accounts and logs an Automated Job Result.';
+            return 'Vendor sync queued. Job Id: ' + jobId +
+                '. Creates/updates Ramp vendors from vendor Accounts. ' + JOB_QUEUED_HINT;
         } catch (Exception e) {
             throw new AuraHandledException('Error starting vendor sync: ' + e.getMessage());
         }
@@ -495,9 +502,9 @@ public with sharing class RampConfigurationController {
     public static String syncTransactions() {
         try {
             Id jobId = System.enqueueJob(new RampTransactionSyncQueueable());
-            return 'Transaction sync started. Job Id: ' + jobId +
+            return 'Transaction sync queued. Job Id: ' + jobId +
                 '. The job will drain all SYNC_READY transactions across pages and ' +
-                'POST sync acknowledgements back to Ramp.';
+                'POST sync acknowledgements back to Ramp. ' + JOB_QUEUED_HINT;
         } catch (Exception e) {
             throw new AuraHandledException('Error starting transaction sync: ' + e.getMessage());
         }
@@ -510,8 +517,9 @@ public with sharing class RampConfigurationController {
     public static String syncBills() {
         try {
             Id jobId = System.enqueueJob(new RampBillSyncQueueable());
-            return 'Bill sync started. Job Id: ' + jobId +
-                '. Drains sync-ready bills across pages, creating Payables (and Cash Disbursements for paid bills).';
+            return 'Bill sync queued. Job Id: ' + jobId +
+                '. Drains sync-ready bills across pages, creating Payables (and Cash Disbursements for paid bills). ' +
+                JOB_QUEUED_HINT;
         } catch (Exception e) {
             throw new AuraHandledException('Error starting bill sync: ' + e.getMessage());
         }
@@ -524,8 +532,8 @@ public with sharing class RampConfigurationController {
     public static String syncReimbursements() {
         try {
             Id jobId = System.enqueueJob(new RampReimbursementSyncQueueable());
-            return 'Reimbursement sync started. Job Id: ' + jobId +
-                '. Drains SYNC_READY reimbursements across pages, creating employee Payables.';
+            return 'Reimbursement sync queued. Job Id: ' + jobId +
+                '. Drains SYNC_READY reimbursements across pages, creating employee Payables. ' + JOB_QUEUED_HINT;
         } catch (Exception e) {
             throw new AuraHandledException('Error starting reimbursement sync: ' + e.getMessage());
         }
