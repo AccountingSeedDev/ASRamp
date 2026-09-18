@@ -143,6 +143,25 @@ private class RampBillBuilderTest {
     }
 
     @IsTest
+    static void build_longLineMemo_truncatesDescriptionAndKeepsFullRampDescription() {
+        configure();
+        Id vId = vendorAccount('Long Memo Vendor');
+        RampBillBuilder.Bill b = sampleBill('bill-long-memo', 10000, null, vId);
+        String longMemo = ''.leftPad(300, 'x');
+        b.line_items[0].memo = longMemo;
+
+        Test.startTest();
+        RampBillBuilder.BuildResult r = RampBillBuilder.build(new List<RampBillBuilder.Bill>{ b });
+        Test.stopTest();
+
+        System.assertEquals(1, r.successful.size(), 'Errors: ' + r.failed);
+        AcctSeed__Account_Payable_Line__c line = r.successful[0].lines[0];
+        System.assertEquals(255, line.AcctSeed__Description__c.length(), 'Description must be truncated to 255 chars');
+        System.assertEquals(longMemo.substring(0, 255), line.AcctSeed__Description__c);
+        System.assertEquals(longMemo, line.Ramp_Description__c, 'Ramp_Description__c must retain the full untruncated memo');
+    }
+
+    @IsTest
     static void build_foreignCurrencyBill_setsCurrencyOnPayable() {
         configure();
         Id vId = vendorAccount('EUR Vendor');
