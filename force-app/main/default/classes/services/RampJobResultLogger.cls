@@ -38,7 +38,15 @@ public with sharing class RampJobResultLogger {
             upsert ajr;
             return ajr.Id;
         } catch (Exception e) {
-            System.debug(LoggingLevel.WARN, 'RampJobResultLogger failed: ' + e.getMessage());
+            // Logging must never break a sync, so this stays non-throwing. It is
+            // logged at ERROR with the job type and stack because a swallowed
+            // failure here is invisible: the run completes and the admin sees no
+            // Automated Job Result at all, which reads as "nothing happened"
+            // (FS-15366). A missing AJR for a job that ran is almost always a
+            // permission problem on AcctSeed__Automated_Job_Results__c.
+            System.debug(LoggingLevel.ERROR, 'RampJobResultLogger could not record "' + jobType +
+                '" (check Create access on AcctSeed__Automated_Job_Results__c): ' +
+                e.getMessage() + '\n' + e.getStackTraceString());
             return existingId;
         }
     }

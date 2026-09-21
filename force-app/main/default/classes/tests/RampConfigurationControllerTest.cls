@@ -177,7 +177,7 @@ private class RampConfigurationControllerTest {
         Test.stopTest();
 
         System.assertNotEquals(null, result, 'Result should not be null');
-        System.assert(result.contains('Sync job started'), 'Should indicate batch job started');
+        System.assert(result.contains('Accounting variable sync queued'), 'Should indicate the batch job was queued: ' + result);
     }
 
     @IsTest
@@ -351,7 +351,7 @@ private class RampConfigurationControllerTest {
         Test.stopTest();
 
         System.assertNotEquals(null, result);
-        System.assert(result.contains('Transaction sync started'), 'Should return started message: ' + result);
+        System.assert(result.contains('Transaction sync queued'), 'Should return the queued message: ' + result);
         System.assert(result.contains('Job Id'), 'Should include job id: ' + result);
     }
 
@@ -604,7 +604,7 @@ private class RampConfigurationControllerTest {
         Test.stopTest();
 
         System.assertNotEquals(null, result, 'Result should not be null');
-        System.assert(result.contains('Sync job started'),
+        System.assert(result.contains('Accounting variable sync queued'),
             'Batch should start even when fields span multiple API pages: ' + result);
     }
 
