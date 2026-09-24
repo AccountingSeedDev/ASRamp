@@ -30,6 +30,10 @@
                 <behavior>Edit</behavior>
                 <field>Payable_Line_Field_API_Name__c</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Fail_Sync_On_Unresolved_Option__c</field>
+            </layoutItems>
         </layoutColumns>
         <layoutColumns>
             <layoutItems>
@@ -55,6 +59,10 @@
             <layoutItems>
                 <behavior>Edit</behavior>
                 <field>JE_Line_Field_API_Name__c</field>
+            </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Description__c</field>
             </layoutItems>
         </layoutColumns>
         <style>TwoColumnsTopToBottom</style>
