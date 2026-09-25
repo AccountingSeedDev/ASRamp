@@ -96,17 +96,7 @@ public with sharing class RampAccountingFieldService {
      */
     @TestVisible
     private static String generateDeterministicUUID(String fieldName) {
-        // Use SHA-256 hash of field name for deterministic UUID
-        Blob hash = Crypto.generateDigest('SHA-256', Blob.valueOf('ASRamp:' + fieldName));
-        String hex = EncodingUtil.convertToHex(hash);
-        // Format as UUID v5: xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx
-        // Position 13 must be '5' (version 5 = name-based)
-        // Position 17 must be 8, 9, a, or b (variant)
-        return hex.substring(0, 8) + '-' +
-               hex.substring(8, 12) + '-' +
-               '5' + hex.substring(13, 16) + '-' +
-               'a' + hex.substring(17, 20) + '-' +
-               hex.substring(20, 32);
+        return RampDeterministicIdUtil.generateUUID('ASRamp:' + fieldName);
     }
 
     /**
