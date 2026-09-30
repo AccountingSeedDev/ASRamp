@@ -171,7 +171,10 @@ public with sharing class RampReimbursementBuilder {
         ap.AcctSeed__Accounting_Period__c = periodId;
         ap.AcctSeed__Ledger__c = ledgerId;
         ap.AcctSeed__Status__c = PAYABLE_STATUS;
-        ap.AcctSeed__Payee_Reference__c = String.isNotBlank(r.merchant) ? r.merchant : r.memo;
+        // Accounting Seed requires Payee Reference to be unique per payee (Employee), so
+        // merchant/memo collided whenever an employee reused a vendor (Case 196082).
+        // The Ramp reimbursement id is unique and always present.
+        ap.AcctSeed__Payee_Reference__c = r.id;
         ap.Ramp_Entity_Id__c = r.entity_id;
         ap.Ramp_Sync_Status__c = 'Pending';
         rb.header = ap;
