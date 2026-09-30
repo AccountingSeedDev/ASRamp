@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Ramp_Field_Label__c</fullName>
+    <description>The label of the matching custom field in Ramp's accounting field configuration. Required: paired with Object_API_Name__c to derive the field's deterministic id, so it must always be set.</description>
     <externalId>false</externalId>
     <fieldManageability>SubscriberControlled</fieldManageability>
     <label>Ramp Field Label</label>
     <length>255</length>
-    <required>false</required>
+    <required>true</required>
     <type>Text</type>
     <unique>false</unique>
 </CustomField>

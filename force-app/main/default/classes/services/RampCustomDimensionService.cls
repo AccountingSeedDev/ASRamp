@@ -27,10 +27,13 @@ public with sharing class RampCustomDimensionService {
 
     /**
      * @description Creates or repairs one Ramp custom field per active registration that
-     * passes validate(). Safe to re-run: the field id is derived deterministically from
-     * Object_API_Name__c, so a repeat call (or a relabel) updates/reactivates the same Ramp
-     * field instead of creating a duplicate. Registrations that fail validation are skipped
-     * entirely — no callout is attempted for them.
+     * passes validate(). Safe to re-run with no configuration change: the field id is derived
+     * deterministically from Object_API_Name__c + Ramp_Field_Label__c, so an unchanged repeat
+     * call updates/reactivates the same Ramp field instead of creating a duplicate. Per the
+     * Object_API_Name__c/Ramp_Field_Label__c pairing agreed with Ryan Sieve, relabeling is a
+     * new key — it creates a new field in Ramp rather than renaming the old one in place, so
+     * the previous field is intentionally left behind, not migrated. Registrations that fail
+     * validation are skipped entirely — no callout is attempted for them.
      * @param accountingConnectionId The Ramp accounting connection id
      * @return String One line per processed registration summarizing the outcome
      */
@@ -130,7 +133,9 @@ public with sharing class RampCustomDimensionService {
 
     @TestVisible
     private static String fieldIdFor(Ramp_Custom_Dimension__mdt registration) {
-        return RampDeterministicIdUtil.generateUUID(FIELD_ID_SEED_PREFIX + registration.Object_API_Name__c);
+        return RampDeterministicIdUtil.generateUUID(
+            FIELD_ID_SEED_PREFIX + registration.Object_API_Name__c + ' - ' + rampFieldName(registration)
+        );
     }
 
     private static String rampFieldName(Ramp_Custom_Dimension__mdt registration) {
@@ -160,8 +165,9 @@ public with sharing class RampCustomDimensionService {
                 return problems;
             }
 
-            if (String.isNotBlank(registration.Ramp_Field_Label__c)
-                    && registration.Ramp_Field_Label__c.toLowerCase().startsWith(RESERVED_LABEL_PREFIX)) {
+            if (String.isBlank(registration.Ramp_Field_Label__c)) {
+                problems.add('Ramp_Field_Label__c is required.');
+            } else if (registration.Ramp_Field_Label__c.toLowerCase().startsWith(RESERVED_LABEL_PREFIX)) {
                 problems.add('Ramp_Field_Label__c "' + registration.Ramp_Field_Label__c + '" cannot start with '
                     + '"GL Account Variable" — that prefix is reserved for the packaged GL Account Variable '
                     + '1-4 fields and would break card transaction sync.');

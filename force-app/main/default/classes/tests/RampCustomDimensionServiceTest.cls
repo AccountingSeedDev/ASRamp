@@ -62,12 +62,30 @@ private class RampCustomDimensionServiceTest {
                 'AcctSeed__Accounting_Variable__c', null, 'AcctSeed__Active__c',
                 'Ramp_Field_Option_Id__c', null, null
             );
+            r.Ramp_Field_Label__c = 'Program';
 
             Test.startTest();
             List<String> problems = RampCustomDimensionService.validate(r);
             Test.stopTest();
 
             System.assertEquals(0, problems.size(), 'Expected no problems: ' + problems);
+        }
+    }
+
+    @IsTest
+    static void validate_blankRampFieldLabel_reportsRequired() {
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        System.runAs(admin) {
+            Ramp_Custom_Dimension__mdt r = registration(
+                'AcctSeed__Accounting_Variable__c', null, 'AcctSeed__Active__c',
+                'Ramp_Field_Option_Id__c', null, null
+            );
+
+            Test.startTest();
+            List<String> problems = RampCustomDimensionService.validate(r);
+            Test.stopTest();
+
+            System.assert(hasProblemContaining(problems, 'Ramp_Field_Label__c is required'), 'Problems: ' + problems);
         }
     }
 
@@ -195,6 +213,7 @@ private class RampCustomDimensionServiceTest {
                 'AcctSeed__GL_Account__c', null, 'AcctSeed__Active__c', 'Ramp_Id__c',
                 'AcctSeed__GL_Account__c', null
             );
+            r.Ramp_Field_Label__c = 'GL Account';
 
             Test.startTest();
             List<String> problems = RampCustomDimensionService.validate(r);
@@ -248,6 +267,7 @@ private class RampCustomDimensionServiceTest {
                 'AcctSeed__Accounting_Variable__c', null, 'AcctSeed__Active__c', 'Ramp_Field_Option_Id__c',
                 null, 'Ramp_Description__c'
             );
+            r.Ramp_Field_Label__c = 'Program';
 
             Test.startTest();
             List<String> problems = RampCustomDimensionService.validate(r);
@@ -265,6 +285,7 @@ private class RampCustomDimensionServiceTest {
                 'AcctSeed__Accounting_Variable__c', null, 'AcctSeed__Active__c',
                 'AcctSeedRamp__Ramp_Field_Option_Id__c', null, null
             );
+            r.Ramp_Field_Label__c = 'Program';
 
             Test.startTest();
             List<String> problems = RampCustomDimensionService.validate(r);
@@ -355,14 +376,20 @@ private class RampCustomDimensionServiceTest {
         }
     }
 
+    /**
+     * Object_API_Name__c + Ramp_Field_Label__c together form the deterministic id's key (per
+     * Ryan Sieve, Sep 2026) — a design change from the id being Object_API_Name__c alone.
+     * Relabeling therefore computes a different id and syncs as a distinct field; it does not
+     * rename the previous field in Ramp, which is left behind.
+     */
     @IsTest
-    static void syncFieldsToRamp_relabeling_reusesSameDeterministicId() {
+    static void syncFieldsToRamp_relabeling_changesDeterministicId() {
         Ramp_Custom_Dimension__mdt original = validSyncRegistration('AcctSeed__Accounting_Variable__c', 'Program');
         Ramp_Custom_Dimension__mdt relabeled = validSyncRegistration('AcctSeed__Accounting_Variable__c', 'Cost Center');
 
-        System.assertEquals(
+        System.assertNotEquals(
             RampCustomDimensionService.fieldIdFor(original), RampCustomDimensionService.fieldIdFor(relabeled),
-            'The id is derived from Object_API_Name__c only, so relabeling must not change it'
+            'The id is derived from Object_API_Name__c + Ramp_Field_Label__c, so relabeling must produce a new id'
         );
     }
 
