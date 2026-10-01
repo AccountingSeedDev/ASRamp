@@ -131,8 +131,7 @@ public with sharing class RampCustomDimensionService {
         return 'marked splittable';
     }
 
-    @TestVisible
-    private static String fieldIdFor(Ramp_Custom_Dimension__mdt registration) {
+    public static String fieldIdFor(Ramp_Custom_Dimension__mdt registration) {
         return RampDeterministicIdUtil.generateUUID(
             FIELD_ID_SEED_PREFIX + registration.Object_API_Name__c + ' - ' + rampFieldName(registration)
         );
