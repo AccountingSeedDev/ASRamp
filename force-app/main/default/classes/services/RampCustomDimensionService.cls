@@ -327,20 +327,13 @@ public with sharing class RampCustomDimensionService {
         return type.getDescribe();
     }
 
-    private static Map<String, Schema.SObjectType> globalDescribeByLowerName;
-
     private static Schema.SObjectType resolveObjectType(String rawName) {
         if (String.isBlank(rawName)) {
             return null;
         }
-        if (globalDescribeByLowerName == null) {
-            globalDescribeByLowerName = new Map<String, Schema.SObjectType>();
-            for (String key : Schema.getGlobalDescribe().keySet()) {
-                globalDescribeByLowerName.put(key.toLowerCase(), Schema.getGlobalDescribe().get(key));
-            }
-        }
+        
         for (String candidate : candidateApiNames(rawName)) {
-            Schema.SObjectType type = globalDescribeByLowerName.get(candidate.toLowerCase());
+            Schema.SObjectType type = Schema.getGlobalDescribe().get(candidate.toLowerCase());
             if (type != null) {
                 return type;
             }
