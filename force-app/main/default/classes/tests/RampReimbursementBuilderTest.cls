@@ -82,6 +82,35 @@ private class RampReimbursementBuilderTest {
     }
 
     @IsTest
+    static void build_reimbursementId_setsPayeeReference() {
+        configure();
+        Test.startTest();
+        RampReimbursementBuilder.BuildResult res = RampReimbursementBuilder.build(new List<RampReimbursementBuilder.Reimbursement>{ sample('rb-ref', 40.00, empEmail, 'APPROVED') });
+        Test.stopTest();
+
+        System.assertEquals(1, res.successful.size(), 'Errors: ' + res.failed);
+        System.assertEquals('rb-ref', res.successful[0].header.AcctSeed__Payee_Reference__c, 'reimbursement id → Payee Reference, not merchant/memo');
+    }
+
+    @IsTest
+    static void build_sameEmployeeSameMerchant_distinctPayeeReferences() {
+        configure();
+        // Case 196082: two reimbursements for one employee at the same merchant used to
+        // share a merchant-based Payee Reference and fail Accounting Seed's duplicate check.
+        RampReimbursementBuilder.Reimbursement r1 = sample('rb-dup-1', 20.00, empEmail, 'REIMBURSED');
+        RampReimbursementBuilder.Reimbursement r2 = sample('rb-dup-2', 30.00, empEmail, 'REIMBURSED');
+        r2.user_id = r1.user_id;
+
+        Test.startTest();
+        RampReimbursementBuilder.BuildResult res = RampReimbursementBuilder.build(new List<RampReimbursementBuilder.Reimbursement>{ r1, r2 });
+        Test.stopTest();
+
+        System.assertEquals(2, res.successful.size(), 'Errors: ' + res.failed);
+        System.assertNotEquals(res.successful[0].header.AcctSeed__Payee_Reference__c, res.successful[1].header.AcctSeed__Payee_Reference__c,
+            'Same merchant must not produce the same Payee Reference');
+    }
+
+    @IsTest
     static void build_paybackAndUserToBusiness_skipped() {
         configure();
         RampReimbursementBuilder.Reimbursement payback = sample('rb-3', 50.00, empEmail, 'APPROVED');
