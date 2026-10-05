@@ -17,6 +17,138 @@ public with sharing class RampCustomDimensionService {
     @TestVisible
     private static final String RESERVED_LABEL_PREFIX = 'gl account variable';
 
+    @TestVisible
+    private static final String FIELD_ID_SEED_PREFIX = 'ASRampDim:';
+
+    // Test seam: Ramp_Custom_Dimension__mdt cannot be inserted in tests, so tests inject the
+    // registrations syncFieldsToRamp should process directly.
+    @TestVisible
+    private static List<Ramp_Custom_Dimension__mdt> overrideRegistrations;
+
+    /**
+     * @description Creates or repairs one Ramp custom field per active registration that
+     * passes validate(). Safe to re-run with no configuration change: the field id is derived
+     * deterministically from Object_API_Name__c + Ramp_Field_Label__c, so an unchanged repeat
+     * call updates/reactivates the same Ramp field instead of creating a duplicate. Per the
+     * Object_API_Name__c/Ramp_Field_Label__c pairing agreed with Ryan Sieve, relabeling is a
+     * new key — it creates a new field in Ramp rather than renaming the old one in place, so
+     * the previous field is intentionally left behind, not migrated. Registrations that fail
+     * validation are skipped entirely — no callout is attempted for them.
+     * @param accountingConnectionId The Ramp accounting connection id
+     * @return String One line per processed registration summarizing the outcome
+     */
+    public static String syncFieldsToRamp(String accountingConnectionId) {
+        List<String> results = new List<String>();
+
+        for (Ramp_Custom_Dimension__mdt registration : getActiveRegistrations()) {
+            String label = registrationLabel(registration);
+            List<String> problems = validate(registration);
+            if (!problems.isEmpty()) {
+                results.add(label + ': skipped — ' + String.join(problems, '; '));
+                continue;
+            }
+            results.add(label + ': ' + syncField(registration, accountingConnectionId));
+        }
+
+        return String.join(results, '\n');
+    }
+
+    private static List<Ramp_Custom_Dimension__mdt> getActiveRegistrations() {
+        if (overrideRegistrations != null) {
+            return overrideRegistrations;
+        }
+        return [
+            SELECT DeveloperName, Object_API_Name__c, Ramp_Field_Label__c, Label_Field_API_Name__c,
+                   Active_Field_API_Name__c, Ramp_Option_Id_Field_API_Name__c,
+                   JE_Line_Field_API_Name__c, Payable_Line_Field_API_Name__c, Active__c
+            FROM Ramp_Custom_Dimension__mdt
+            WHERE Active__c = true
+        ];
+    }
+
+    /**
+     * @description Creates (or repairs) the Ramp custom field for one already-validated
+     * registration: POSTs the field keyed on a deterministic id, then reads is_splittable
+     * back from the response and PATCHes it true when Ramp defaulted the field to
+     * non-splittable or silently discarded the flag on an existing field (FS-15129).
+     */
+    private static String syncField(Ramp_Custom_Dimension__mdt registration, String accountingConnectionId) {
+        try {
+            String fieldId = fieldIdFor(registration);
+
+            Map<String, Object> requestBody = new Map<String, Object>{
+                'id' => fieldId,
+                'name' => rampFieldName(registration),
+                'input_type' => 'SINGLE_CHOICE',
+                'accounting_connection_id' => accountingConnectionId,
+                'is_splittable' => true
+            };
+
+            HttpResponse res = RampAPIService.post('/developer/v1/accounting/fields', JSON.serialize(requestBody));
+            if (res.getStatusCode() != 200 && res.getStatusCode() != 201) {
+                throw new RampCustomDimensionException(
+                    'Failed to create field. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
+                );
+            }
+
+            Map<String, Object> response = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            String externalId = (String) response.get('id');
+            if (String.isBlank(externalId)) {
+                externalId = fieldId;
+            }
+
+            String repair = '';
+            if (response.get('is_splittable') != true) {
+                repair = ensureSplittable((String) response.get('ramp_id'));
+            }
+
+            return 'Created (ID: ' + externalId + ')' + (String.isBlank(repair) ? '' : ' · ' + repair);
+        } catch (Exception e) {
+            throw new RampCustomDimensionException(
+                'Error creating field for "' + registrationLabel(registration) + '": ' + e.getMessage(), e
+            );
+        }
+    }
+
+    /**
+     * @description PATCHes is_splittable true on an existing field. Keyed on ramp_id only —
+     * the deterministic external id 404s with DEVELOPER_7002 on this endpoint.
+     */
+    private static String ensureSplittable(String rampId) {
+        if (String.isBlank(rampId)) {
+            return 'could not be marked splittable: Ramp returned no ramp_id';
+        }
+
+        String body = JSON.serialize(new Map<String, Object>{ 'is_splittable' => true });
+        HttpResponse res = RampAPIService.patch('/developer/v1/accounting/fields/' + rampId, body);
+
+        if (res.getStatusCode() != 200) {
+            throw new RampCustomDimensionException(
+                'Failed to mark field as splittable. Status: ' + res.getStatusCode() + ', Response: ' + res.getBody()
+            );
+        }
+
+        return 'marked splittable';
+    }
+
+    public static String fieldIdFor(Ramp_Custom_Dimension__mdt registration) {
+        return RampDeterministicIdUtil.generateUUID(
+            FIELD_ID_SEED_PREFIX + registration.Object_API_Name__c + ' - ' + rampFieldName(registration)
+        );
+    }
+
+    private static String rampFieldName(Ramp_Custom_Dimension__mdt registration) {
+        return String.isNotBlank(registration.Ramp_Field_Label__c)
+            ? registration.Ramp_Field_Label__c
+            : registration.Object_API_Name__c;
+    }
+
+    private static String registrationLabel(Ramp_Custom_Dimension__mdt registration) {
+        return String.isNotBlank(registration.DeveloperName)
+            ? registration.DeveloperName
+            : rampFieldName(registration);
+    }
+
     /**
      * @description Validates a single Ramp_Custom_Dimension__mdt registration against the
      * running user's schema access.
@@ -32,8 +164,9 @@ public with sharing class RampCustomDimensionService {
                 return problems;
             }
 
-            if (String.isNotBlank(registration.Ramp_Field_Label__c)
-                    && registration.Ramp_Field_Label__c.toLowerCase().startsWith(RESERVED_LABEL_PREFIX)) {
+            if (String.isBlank(registration.Ramp_Field_Label__c)) {
+                problems.add('Ramp_Field_Label__c is required.');
+            } else if (registration.Ramp_Field_Label__c.toLowerCase().startsWith(RESERVED_LABEL_PREFIX)) {
                 problems.add('Ramp_Field_Label__c "' + registration.Ramp_Field_Label__c + '" cannot start with '
                     + '"GL Account Variable" — that prefix is reserved for the packaged GL Account Variable '
                     + '1-4 fields and would break card transaction sync.');
@@ -244,4 +377,6 @@ public with sharing class RampCustomDimensionService {
 
         return candidates;
     }
+
+    public class RampCustomDimensionException extends Exception {}
 }
