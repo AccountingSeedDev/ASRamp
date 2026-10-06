@@ -96,7 +96,7 @@ public with sharing class RampAccountingFieldService {
      */
     @TestVisible
     private static String generateDeterministicUUID(String fieldName) {
-        return RampDeterministicIdUtil.generateUUID('ASRamp:' + fieldName);
+        return RampDeterministicIdUtil.generateUUID(fieldName);
     }
 
     /**
