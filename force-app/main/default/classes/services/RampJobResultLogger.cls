@@ -17,6 +17,7 @@ public with sharing class RampJobResultLogger {
     public static final String JOB_FIELD_OPTIONS_SYNC = 'Ramp Accounting Variable Sync';
     public static final String JOB_GL_SYNC = 'Ramp GL Account Sync';
     public static final String JOB_VENDOR_SYNC = 'Ramp Vendor Sync';
+    public static final String JOB_CUSTOM_DIMENSION_SYNC = 'Ramp Custom Dimension Sync';
 
     private static final Integer NOTES_MAX = 30000;
 

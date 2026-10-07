@@ -267,7 +267,7 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
      * after all callouts complete.
      *
      * Paging follows Ramp's keyset pagination: page.next carries the complete URL of the
-     * next page, so extractNextCursor() pulls out just the start cursor. Requests
+     * next page, so RampPaginationUtil.extractNextCursor() pulls out just the start cursor. Requests
      * page_size=LOOKUP_PAGE_SIZE (Ramp's documented max) rather than the default 20.
      * The loop stops early once every requested ID is found, and is bounded at
      * MAX_LOOKUP_PAGES so a very large option set cannot exhaust the callout limit —
@@ -307,7 +307,7 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
                     }
                 }
 
-                nextCursor = extractNextCursor(response);
+                nextCursor = RampPaginationUtil.extractNextCursor(response);
                 pageCount++;
             } else {
                 throw new RampAccountingFieldService.RampAccountingFieldException(
@@ -320,24 +320,4 @@ public class RampFieldOptionsSyncBatch implements Database.Batchable<SObject>, D
         return result;
     }
 
-    /**
-     * @description Pulls the keyset cursor out of Ramp's page.next URL. Ramp returns the
-     * complete URL of the next page (e.g. ".../field-options?field_id=<id>&start=<cursor>"),
-     * so the cursor must be extracted rather than used as-is — passing the whole URL as
-     * `start` makes Ramp reject the request (DEVELOPER_7001 "Not a valid UUID").
-     * @param responseMap The parsed JSON body of a paginated Ramp response
-     * @return String The start cursor for the next page, or null if there is none
-     */
-    private static String extractNextCursor(Map<String, Object> responseMap) {
-        Object pageObj = responseMap.get('page');
-        if (!(pageObj instanceof Map<String, Object>)) return null;
-        String nextUrl = (String) ((Map<String, Object>) pageObj).get('next');
-        if (String.isBlank(nextUrl)) return null;
-        Integer i = nextUrl.indexOf('start=');
-        if (i < 0) return null;
-        String cursor = nextUrl.substring(i + 6);
-        Integer amp = cursor.indexOf('&');
-        if (amp >= 0) cursor = cursor.substring(0, amp);
-        return cursor;
-    }
 }
