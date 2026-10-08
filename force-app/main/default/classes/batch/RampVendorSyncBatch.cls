@@ -256,25 +256,12 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
                     }
                 }
             }
-
-            nextStart = extractNextCursor(body);
+            
+            nextStart = RampPaginationUtil.extractNextCursor(body);
             pages++;
         } while (String.isNotBlank(nextStart) && pages < 50);
 
         return sfIdToRampId;
-    }
-
-    private static String extractNextCursor(Map<String, Object> body) {
-        Map<String, Object> page = (Map<String, Object>) body.get('page');
-        if (page == null) return null;
-        String nextUrl = (String) page.get('next');
-        if (String.isBlank(nextUrl)) return null;
-        Integer i = nextUrl.indexOf('start=');
-        if (i < 0) return null;
-        String cursor = nextUrl.substring(i + 6);
-        Integer amp = cursor.indexOf('&');
-        if (amp >= 0) cursor = cursor.substring(0, amp);
-        return cursor;
     }
 
     /**
@@ -419,7 +406,7 @@ public class RampVendorSyncBatch implements Database.Batchable<SObject>, Databas
                     }
                 }
 
-                nextCursor = extractNextCursor(response);
+                nextCursor = RampPaginationUtil.extractNextCursor(response);
                 pageCount++;
             } else {
                 System.debug('Failed to fetch vendors: ' + res.getStatusCode() + ' - ' + res.getBody());

@@ -270,7 +270,7 @@ public with sharing class RampConfigurationController {
                     fields = responseMap.containsKey('data')
                         ? (List<Object>) responseMap.get('data')
                         : new List<Object>();
-                    nextPage = extractNextCursor(responseMap);
+                    nextPage = RampPaginationUtil.extractNextCursor(responseMap);
                 } else {
                     fields = new List<Object>();
                     nextPage = null;
@@ -293,26 +293,6 @@ public with sharing class RampConfigurationController {
         }
 
         return fieldMap;
-    }
-
-    /**
-     * @description Pulls the keyset cursor out of Ramp's page.next URL. Ramp
-     * returns the complete URL of the next page (e.g. ".../fields?start=<cursor>"),
-     * so the cursor must be extracted rather than used as-is.
-     * @param responseMap The parsed JSON body of a paginated Ramp response
-     * @return String The start cursor for the next page, or null if there is none
-     */
-    private static String extractNextCursor(Map<String, Object> responseMap) {
-        Object pageObj = responseMap.get('page');
-        if (!(pageObj instanceof Map<String, Object>)) return null;
-        String nextUrl = (String) ((Map<String, Object>) pageObj).get('next');
-        if (String.isBlank(nextUrl)) return null;
-        Integer i = nextUrl.indexOf('start=');
-        if (i < 0) return null;
-        String cursor = nextUrl.substring(i + 6);
-        Integer amp = cursor.indexOf('&');
-        if (amp >= 0) cursor = cursor.substring(0, amp);
-        return cursor;
     }
 
     /**
@@ -415,7 +395,7 @@ public with sharing class RampConfigurationController {
                     fields = responseMap.containsKey('data')
                         ? (List<Object>) responseMap.get('data')
                         : new List<Object>();
-                    nextPage = extractNextCursor(responseMap);
+                    nextPage = RampPaginationUtil.extractNextCursor(responseMap);
                 } else {
                     fields = new List<Object>();
                     nextPage = null;

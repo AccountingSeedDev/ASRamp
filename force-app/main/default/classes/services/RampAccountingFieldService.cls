@@ -300,30 +300,10 @@ public with sharing class RampAccountingFieldService {
                 if (String.isNotBlank(name)) byName.put(name, field);
             }
 
-            cursor = extractNextCursor(response);
+            cursor = RampPaginationUtil.extractNextCursor(response);
         } while (String.isNotBlank(cursor));
 
         return byName;
-    }
-
-    /**
-     * @description Pulls the keyset cursor out of Ramp's page.next URL. Ramp returns the
-     * complete URL of the next page, so passing it straight back as `start` is rejected
-     * with DEVELOPER_7001 "Not a valid UUID".
-     * @param responseMap The parsed JSON body of a paginated Ramp response
-     * @return String The start cursor for the next page, or null if there is none
-     */
-    private static String extractNextCursor(Map<String, Object> responseMap) {
-        Object pageObj = responseMap.get('page');
-        if (!(pageObj instanceof Map<String, Object>)) return null;
-        String nextUrl = (String) ((Map<String, Object>) pageObj).get('next');
-        if (String.isBlank(nextUrl)) return null;
-        Integer i = nextUrl.indexOf('start=');
-        if (i < 0) return null;
-        String cursor = nextUrl.substring(i + 6);
-        Integer amp = cursor.indexOf('&');
-        if (amp >= 0) cursor = cursor.substring(0, amp);
-        return cursor;
     }
 
     /**

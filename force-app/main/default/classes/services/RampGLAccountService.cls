@@ -227,28 +227,11 @@ public with sharing class RampGLAccountService {
                 }
             }
 
-            nextStart = extractNextCursor(body);
+            nextStart = RampPaginationUtil.extractNextCursor(body);
             pages++;
         } while (String.isNotBlank(nextStart) && pages < 50);
 
         return sfIdToRampId;
-    }
-
-    /**
-     * @description Pulls the cursor out of Ramp's page.next URL. Returns null
-     * when there's no next page.
-     */
-    private static String extractNextCursor(Map<String, Object> body) {
-        Map<String, Object> page = (Map<String, Object>) body.get('page');
-        if (page == null) return null;
-        String nextUrl = (String) page.get('next');
-        if (String.isBlank(nextUrl)) return null;
-        Integer i = nextUrl.indexOf('start=');
-        if (i < 0) return null;
-        String cursor = nextUrl.substring(i + 6);
-        Integer amp = cursor.indexOf('&');
-        if (amp >= 0) cursor = cursor.substring(0, amp);
-        return cursor;
     }
 
     /**

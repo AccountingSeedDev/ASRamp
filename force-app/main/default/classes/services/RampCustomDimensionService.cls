@@ -53,7 +53,12 @@ public with sharing class RampCustomDimensionService {
         return String.join(results, '\n');
     }
 
-    private static List<Ramp_Custom_Dimension__mdt> getActiveRegistrations() {
+    /**
+     * @description Active registrations to sync. Tests inject overrideRegistrations because
+     * Ramp_Custom_Dimension__mdt cannot be inserted.
+     * @return List<Ramp_Custom_Dimension__mdt> Active registrations
+     */
+    public static List<Ramp_Custom_Dimension__mdt> getActiveRegistrations() {
         if (overrideRegistrations != null) {
             return overrideRegistrations;
         }
@@ -131,6 +136,12 @@ public with sharing class RampCustomDimensionService {
         return 'marked splittable';
     }
 
+    /**
+     * @description The deterministic Ramp field id for a registration. The options sync keys
+     * field resolution on this id, never on the field name.
+     * @param registration The registration whose Object_API_Name__c and Ramp field label seed the id
+     * @return String A UUID-formatted id that is stable for the same object + label pairing
+     */
     public static String fieldIdFor(Ramp_Custom_Dimension__mdt registration) {
         return RampDeterministicIdUtil.generateUUID(
             FIELD_ID_SEED_PREFIX + registration.Object_API_Name__c + ' - ' + rampFieldName(registration)
@@ -143,7 +154,12 @@ public with sharing class RampCustomDimensionService {
             : registration.Object_API_Name__c;
     }
 
-    private static String registrationLabel(Ramp_Custom_Dimension__mdt registration) {
+    /**
+     * @description Display name for a registration in sync results and AJR notes.
+     * @param registration The registration
+     * @return String DeveloperName, or the Ramp field name when DeveloperName is blank
+    */
+    public static String registrationLabel(Ramp_Custom_Dimension__mdt registration) {
         return String.isNotBlank(registration.DeveloperName)
             ? registration.DeveloperName
             : rampFieldName(registration);
@@ -198,6 +214,50 @@ public with sharing class RampCustomDimensionService {
         }
 
         return problems;
+    }
+
+    /**
+     * @description A registration whose object and field names have been resolved through
+     * describe to their canonical API names — the only names the options sync may place in
+     * dynamic SOQL or pass to SObject.get()/put().
+     */
+    public class ResolvedRegistration {
+        public String objectApiName;
+        public String labelFieldApiName;
+        public String activeFieldApiName;
+        public String optionIdFieldApiName;
+    }
+
+    /**
+     * @description Validates a registration and resolves its object/field names to the
+     * canonical API names reported by describe, so no raw CMDT text is ever concatenated
+     * into a query.
+     * @param registration The registration to resolve
+     * @return ResolvedRegistration Describe-derived names
+     * @throws RampCustomDimensionException when the registration fails validate()
+     */
+    public static ResolvedRegistration resolve(Ramp_Custom_Dimension__mdt registration) {
+        List<String> problems = validate(registration);
+        if (!problems.isEmpty()) {
+            throw new RampCustomDimensionException(String.join(problems, '; '));
+        }
+
+        Schema.DescribeSObjectResult objDescribe =
+            resolveObjectType(registration.Object_API_Name__c).getDescribe();
+        Map<String, Schema.SObjectField> fieldsByName = objDescribe.fields.getMap();
+
+        ResolvedRegistration resolved = new ResolvedRegistration();
+        resolved.objectApiName = objDescribe.getName();
+        resolved.labelFieldApiName = resolveField(fieldsByName,
+            String.isBlank(registration.Label_Field_API_Name__c) ? 'Name' : registration.Label_Field_API_Name__c
+        ).getName();
+        resolved.optionIdFieldApiName =
+            resolveField(fieldsByName, registration.Ramp_Option_Id_Field_API_Name__c).getName();
+        if (String.isNotBlank(registration.Active_Field_API_Name__c)) {
+            resolved.activeFieldApiName =
+                resolveField(fieldsByName, registration.Active_Field_API_Name__c).getName();
+        }
+        return resolved;
     }
 
     private static void validateLabelField(Ramp_Custom_Dimension__mdt registration,
