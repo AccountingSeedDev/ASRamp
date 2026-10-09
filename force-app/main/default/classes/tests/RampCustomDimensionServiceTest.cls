@@ -377,8 +377,8 @@ private class RampCustomDimensionServiceTest {
     }
 
     /**
-     * Object_API_Name__c + Ramp_Field_Label__c together form the deterministic id's key (per
-     * Ryan Sieve, Sep 2026) — a design change from the id being Object_API_Name__c alone.
+     * Object_API_Name__c + Ramp_Field_Label__c together form the deterministic id's key 
+     *  — a design change from the id being Object_API_Name__c alone.
      * Relabeling therefore computes a different id and syncs as a distinct field; it does not
      * rename the previous field in Ramp, which is left behind.
      */
@@ -468,6 +468,24 @@ private class RampCustomDimensionServiceTest {
 
             Test.stopTest();
         }
+    }
+
+    @IsTest
+    static void fieldIdFor_ignoresObjectNameCase() {
+        Ramp_Custom_Dimension__mdt canonical = new Ramp_Custom_Dimension__mdt(
+            Object_API_Name__c = 'AcctSeed__Accounting_Variable__c', Ramp_Field_Label__c = 'Program');
+        Ramp_Custom_Dimension__mdt lower = new Ramp_Custom_Dimension__mdt(
+            Object_API_Name__c = 'acctseed__accounting_variable__c', Ramp_Field_Label__c = 'Program');
+
+        System.assertEquals(RampCustomDimensionService.fieldIdFor(canonical), RampCustomDimensionService.fieldIdFor(lower),
+            'Object name case must not change the Ramp field id');
+    }
+
+    @IsTest
+    static void fieldIdFor_unresolvableObject_doesNotThrow() {
+        Ramp_Custom_Dimension__mdt r = new Ramp_Custom_Dimension__mdt(
+            Object_API_Name__c = 'Not_A_Real_Object__c', Ramp_Field_Label__c = 'Program');
+        System.assertEquals(36, RampCustomDimensionService.fieldIdFor(r).length());
     }
 
     /**

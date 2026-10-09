@@ -417,6 +417,30 @@ private class RampCustomDimensionOptionsSyncBatchTest {
         }
     }
 
+        @IsTest
+    static void fieldResolution_objectNameInDifferentCase_findsExistingField() {
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            insertVariables(2, true);
+            Ramp_Custom_Dimension__mdt original = registration('Program', 'Program');
+            Ramp_Custom_Dimension__mdt recased = registration('Program', 'Program');
+            recased.Object_API_Name__c = 'acctseed__accounting_variable__c';
+            recased.Active_Field_API_Name__c = 'acctseed__active__c';
+            recased.Ramp_Option_Id_Field_API_Name__c = 'RAMP_FIELD_OPTION_ID__C';
+            // Ramp holds the field created from the originally cased registration.
+            RampOptionsMock mock = new RampOptionsMock(RampCustomDimensionService.fieldIdFor(original));
+
+            Test.setMock(HttpCalloutMock.class, mock);
+            Test.startTest();
+            Database.executeBatch(new RampCustomDimensionOptionsSyncBatch(
+                TEST_CONNECTION_ID, new List<Ramp_Custom_Dimension__mdt>{ recased }), 50);
+            Test.stopTest();
+
+            AcctSeed__Automated_Job_Results__c ajr = onlyAjr();
+            System.assertEquals(0, ajr.AcctSeed__Failed__c, 'Notes: ' + ajr.AcctSeed__Notes__c);
+            System.assertEquals(FIELD_RAMP_ID, lastPostFieldId);
+        }
+    }
+
     /**
      * Simulates Ramp's accounting fields and field-options endpoints:
      *  - GET fields lists the registration's field (by its deterministic id) and an optional

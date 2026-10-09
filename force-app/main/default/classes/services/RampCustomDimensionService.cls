@@ -138,14 +138,27 @@ public with sharing class RampCustomDimensionService {
 
     /**
      * @description The deterministic Ramp field id for a registration. The options sync keys
-     * field resolution on this id, never on the field name.
-     * @param registration The registration whose Object_API_Name__c and Ramp field label seed the id
+     * field resolution on this id, never on the field name. The object part of the seed is the
+     * describe-canonical API name, so a registration typed in a different case
+     * (dev_project__c vs Dev_Project__c) or with the namespace spelled out still derives the
+     * same id (FS-15626).
+     * @param registration The registration whose object and Ramp field label seed the id
      * @return String A UUID-formatted id that is stable for the same object + label pairing
      */
     public static String fieldIdFor(Ramp_Custom_Dimension__mdt registration) {
         return RampDeterministicIdUtil.generateUUID(
-            FIELD_ID_SEED_PREFIX + registration.Object_API_Name__c + ' - ' + rampFieldName(registration)
+            FIELD_ID_SEED_PREFIX + canonicalObjectName(registration.Object_API_Name__c) + ' - ' +
+            rampFieldName(registration)
         );
+    }
+
+    /**
+     * @description The object's API name as describe reports it, or the raw value when it does
+     * not resolve (validate() rejects such registrations before any callout).
+     */
+    private static String canonicalObjectName(String rawName) {
+        Schema.SObjectType type = resolveObjectType(rawName);
+        return type == null ? rawName : type.getDescribe().getName();
     }
 
     private static String rampFieldName(Ramp_Custom_Dimension__mdt registration) {
