@@ -36,8 +36,14 @@ public with sharing class RampCustomDimensionService {
      * validation are skipped entirely — no callout is attempted for them.
      * @param accountingConnectionId The Ramp accounting connection id
      * @return String One line per processed registration summarizing the outcome
+     * @throws RampCustomDimensionException when accountingConnectionId is blank — no callout is
+     *         attempted, since Ramp would otherwise be sent accounting_connection_id: null
      */
     public static String syncFieldsToRamp(String accountingConnectionId) {
+        if (String.isBlank(accountingConnectionId)) {
+            throw new RampCustomDimensionException('No Ramp accounting connection ID found. Field sync aborted.');
+        }
+        
         List<String> results = new List<String>();
 
         for (Ramp_Custom_Dimension__mdt registration : getActiveRegistrations()) {
