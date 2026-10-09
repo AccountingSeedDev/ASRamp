@@ -470,6 +470,24 @@ private class RampCustomDimensionServiceTest {
         }
     }
 
+    @IsTest
+    static void fieldIdFor_ignoresObjectNameCase() {
+        Ramp_Custom_Dimension__mdt canonical = new Ramp_Custom_Dimension__mdt(
+            Object_API_Name__c = 'AcctSeed__Accounting_Variable__c', Ramp_Field_Label__c = 'Program');
+        Ramp_Custom_Dimension__mdt lower = new Ramp_Custom_Dimension__mdt(
+            Object_API_Name__c = 'acctseed__accounting_variable__c', Ramp_Field_Label__c = 'Program');
+
+        System.assertEquals(RampCustomDimensionService.fieldIdFor(canonical), RampCustomDimensionService.fieldIdFor(lower),
+            'Object name case must not change the Ramp field id');
+    }
+
+    @IsTest
+    static void fieldIdFor_unresolvableObject_doesNotThrow() {
+        Ramp_Custom_Dimension__mdt r = new Ramp_Custom_Dimension__mdt(
+            Object_API_Name__c = 'Not_A_Real_Object__c', Ramp_Field_Label__c = 'Program');
+        System.assertEquals(36, RampCustomDimensionService.fieldIdFor(r).length());
+    }
+
     /**
      * Mirrors how Ramp actually answers these endpoints (see RampAccountingFieldServiceTest):
      * POST for an id Ramp already holds returns 201 with the stored field, and PATCH accepts
