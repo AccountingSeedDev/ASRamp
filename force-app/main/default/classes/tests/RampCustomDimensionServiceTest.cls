@@ -377,8 +377,8 @@ private class RampCustomDimensionServiceTest {
     }
 
     /**
-     * Object_API_Name__c + Ramp_Field_Label__c together form the deterministic id's key (per
-     * Ryan Sieve, Sep 2026) — a design change from the id being Object_API_Name__c alone.
+     * Object_API_Name__c + Ramp_Field_Label__c together form the deterministic id's key 
+     *  — a design change from the id being Object_API_Name__c alone.
      * Relabeling therefore computes a different id and syncs as a distinct field; it does not
      * rename the previous field in Ramp, which is left behind.
      */
@@ -467,6 +467,36 @@ private class RampCustomDimensionServiceTest {
             }
 
             Test.stopTest();
+        }
+    }
+
+    @IsTest
+    static void syncFieldsToRamp_blankConnectionId_abortsWithoutCallout() {
+        User admin = TestDataFactory.getInstance().getAdminUser();
+        System.runAs(admin) {
+            Ramp_Custom_Dimension__mdt registration = validSyncRegistration('AcctSeed__Accounting_Variable__c', 'Program');
+            RampCustomDimensionService.overrideRegistrations = new List<Ramp_Custom_Dimension__mdt>{ registration };
+
+            RampCustomDimensionMockSuccess mock = new RampCustomDimensionMockSuccess();
+            mock.postReturnsSplittable = true;
+
+            Test.startTest();
+            Test.setMock(HttpCalloutMock.class, mock);
+
+            for (String blank : new List<String>{ null, '', '   ' }) {
+                try {
+                    RampCustomDimensionService.syncFieldsToRamp(blank);
+                    System.assert(false, 'Expected an exception for connection id "' + blank + '"');
+                } catch (RampCustomDimensionService.RampCustomDimensionException e) {
+                    System.assertEquals(
+                        'No Ramp accounting connection ID found. Field sync aborted.', e.getMessage()
+                    );
+                }
+            }
+            Test.stopTest();
+
+            System.assertEquals(0, mock.postCount, 'No POST may be sent without a connection id');
+            System.assertEquals(0, mock.patchCount, 'No PATCH may be sent without a connection id');
         }
     }
 
