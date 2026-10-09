@@ -8,14 +8,8 @@ public with sharing class RampAccountingFieldService {
      * This only creates the field definitions - options are synced separately via batch
      * @param accountingConnectionId The Ramp accounting connection ID
      * @return String Summary of sync results
-     * @throws RampAccountingFieldException when accountingConnectionId is blank — no callout is
-     *         attempted, since Ramp would otherwise be sent accounting_connection_id: null
      */
     public static String syncAccountingVariablesToRamp(String accountingConnectionId) {
-        if (String.isBlank(accountingConnectionId)) {
-            throw new RampAccountingFieldException('No Ramp accounting connection ID found. Field sync aborted.');
-        }
-
         try {
             List<String> results = new List<String>();
 
