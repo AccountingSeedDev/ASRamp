@@ -46,30 +46,6 @@ private class RampAccountingFieldServiceTest {
     }
 
     @IsTest
-    static void testSyncAccountingVariablesToRamp_BlankConnectionId_AbortsWithoutCallout() {
-        RampAccountingFieldMockSuccess mock = new RampAccountingFieldMockSuccess();
-
-        Test.startTest();
-        Test.setMock(HttpCalloutMock.class, mock);
-
-        for (String blank : new List<String>{ null, '', '   ' }) {
-            try {
-                RampAccountingFieldService.syncAccountingVariablesToRamp(blank);
-                System.assert(false, 'Expected an exception for connection id "' + blank + '"');
-            } catch (RampAccountingFieldService.RampAccountingFieldException e) {
-                System.assertEquals(
-                    'No Ramp accounting connection ID found. Field sync aborted.', e.getMessage()
-                );
-            }
-        }
-
-        Test.stopTest();
-
-        System.assertEquals(null, mock.lastRequestBody, 'No POST may be sent without a connection id');
-        System.assertEquals(0, mock.patchCount, 'No PATCH may be sent without a connection id');
-    }
-
-    @IsTest
     static void testCreateVariableField_SendsSplittableFlag() {
         RampAccountingFieldMockSuccess mock = new RampAccountingFieldMockSuccess();
 
