@@ -9,6 +9,11 @@
  * created the field — never on the field name, which is one rename in Ramp away from
  * breaking.
  *
+ * Records leaving scope (Active_Field_API_Name__c false) have their option HIDDEN, never
+ * deactivated: per Ramp, a deactivated option can no longer be synced, while a hidden one
+ * only drops out of new coding — so transactions already coded to it keep exporting and
+ * resolving. A record re-entering scope PATCHes the same option back to VISIBLE.
+ *
  * Callout/DML ordering: Salesforce prohibits callouts after uncommitted DML in the same
  * transaction. execute() is structured in four explicit phases — all PATCHes, all POSTs,
  * all GETs, then a single DML — so a chunk never produces a "You have uncommitted work
@@ -40,6 +45,12 @@ public class RampCustomDimensionOptionsSyncBatch implements Database.Batchable<S
     /** Ramp's error code for a POSTed option whose id already exists on the field. */
     @TestVisible
     private static final String DUPLICATE_OPTION_CODE = 'DEVELOPER_7020';
+
+    /** Ramp field-option visibility values. */
+    @TestVisible
+    private static final String VISIBILITY_VISIBLE = 'VISIBLE';
+    @TestVisible
+    private static final String VISIBILITY_HIDDEN = 'HIDDEN';
 
     private String accountingConnectionId;
     private Ramp_Custom_Dimension__mdt registration;
@@ -115,7 +126,7 @@ public class RampCustomDimensionOptionsSyncBatch implements Database.Batchable<S
 
     /**
      * @description Records that are active (so need an option) or already hold an option id
-     * (so their option must be kept in step, including deactivation).
+     * (so their option must be kept in step, including hiding it once the record leaves scope).
      */
     @TestVisible
     private static String buildQuery(RampCustomDimensionService.ResolvedRegistration r) {
@@ -323,13 +334,15 @@ public class RampCustomDimensionOptionsSyncBatch implements Database.Batchable<S
     }
 
     /**
-     * @description PATCH an existing option in Ramp, keyed on the stored ramp_id. Callout
-     * only — no DML.
+     * @description PATCH an existing option in Ramp, keyed on the stored ramp_id. A record
+     * out of scope is HIDDEN and one in scope is VISIBLE; is_active is deliberately never
+     * sent, since a deactivated option can no longer be synced and would strand the
+     * transactions already coded to it. Callout only — no DML.
      */
     private void patchOption(SObject record) {
         Map<String, Object> requestBody = new Map<String, Object>{
             'value' => labelOf(record),
-            'is_active' => isActive(record)
+            'visibility' => isActive(record) ? VISIBILITY_VISIBLE : VISIBILITY_HIDDEN
         };
 
         HttpResponse res = RampAPIService.patch(

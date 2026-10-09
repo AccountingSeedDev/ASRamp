@@ -167,8 +167,14 @@ private class RampCustomDimensionOptionsSyncBatchTest {
         }
     }
 
+    // ─────────────────────────── leaving / re-entering scope ───────────────────────────
+
+    /**
+     * A record leaving scope must hide its option — never deactivate it — and keep its stamped
+     * option id, so lines already coded to it keep exporting and resolving.
+     */
     @IsTest
-    static void execute_inactiveRecordWithOptionId_patchesItInactive() {
+    static void execute_recordLeavingScope_hidesOptionAndNeverDeactivates() {
         System.runAs(TestDataFactory.getInstance().getAdminUser()) {
             AcctSeed__Accounting_Variable__c retired = new AcctSeed__Accounting_Variable__c(
                 Name = 'Retired', AcctSeed__Type__c = 'GL Account Variable 1',
@@ -186,8 +192,57 @@ private class RampCustomDimensionOptionsSyncBatchTest {
 
             String body = mock.patchBodiesByPath.get('/developer/v1/accounting/field-options/' + RAMP_OPTION_PREFIX + 'retired');
             System.assertNotEquals(null, body, 'The retired option should be PATCHed: ' + callLog);
-            System.assertEquals(false, ((Map<String, Object>) JSON.deserializeUntyped(body)).get('is_active'),
-                'Deactivating the record must deactivate its Ramp option: ' + body);
+            Map<String, Object> sent = (Map<String, Object>) JSON.deserializeUntyped(body);
+            System.assertEquals(RampCustomDimensionOptionsSyncBatch.VISIBILITY_HIDDEN, sent.get('visibility'),
+                'A record leaving scope must hide its Ramp option: ' + body);
+            System.assert(!sent.containsKey('is_active'),
+                'is_active must never be sent for a record leaving scope: ' + body);
+            System.assertEquals(0, countCalls('POST /developer/v1/accounting/field-options'),
+                'A hidden record must not be re-created in Ramp: ' + callLog);
+            System.assertEquals(RAMP_OPTION_PREFIX + 'retired',
+                [SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c WHERE Id = :retired.Id]
+                    .Ramp_Field_Option_Id__c,
+                'Hiding must keep the stamped option id so existing codings still resolve');
+
+            AcctSeed__Automated_Job_Results__c ajr = onlyAjr();
+            System.assertEquals(1, ajr.AcctSeed__Succeeded__c, 'Notes: ' + ajr.AcctSeed__Notes__c);
+            System.assertEquals(0, ajr.AcctSeed__Failed__c, 'Notes: ' + ajr.AcctSeed__Notes__c);
+        }
+    }
+
+    /**
+     * A record re-entering scope still holds its option id, so it must un-hide that same option
+     * rather than POST a new one.
+     */
+    @IsTest
+    static void execute_recordReenteringScope_unhidesSameOption() {
+        System.runAs(TestDataFactory.getInstance().getAdminUser()) {
+            AcctSeed__Accounting_Variable__c reopened = new AcctSeed__Accounting_Variable__c(
+                Name = 'Reopened', AcctSeed__Type__c = 'GL Account Variable 1',
+                AcctSeed__Active__c = true, Ramp_Field_Option_Id__c = RAMP_OPTION_PREFIX + 'reopened'
+            );
+            insert reopened;
+            Ramp_Custom_Dimension__mdt r = registration('Program', 'Program');
+            RampOptionsMock mock = new RampOptionsMock(RampCustomDimensionService.fieldIdFor(r));
+
+            Test.setMock(HttpCalloutMock.class, mock);
+            Test.startTest();
+            Database.executeBatch(new RampCustomDimensionOptionsSyncBatch(
+                TEST_CONNECTION_ID, new List<Ramp_Custom_Dimension__mdt>{ r }), 50);
+            Test.stopTest();
+
+            String body = mock.patchBodiesByPath.get('/developer/v1/accounting/field-options/' + RAMP_OPTION_PREFIX + 'reopened');
+            System.assertNotEquals(null, body, 'The re-entering option should be PATCHed: ' + callLog);
+            Map<String, Object> sent = (Map<String, Object>) JSON.deserializeUntyped(body);
+            System.assertEquals(RampCustomDimensionOptionsSyncBatch.VISIBILITY_VISIBLE, sent.get('visibility'),
+                'A record re-entering scope must un-hide its Ramp option: ' + body);
+            System.assert(!sent.containsKey('is_active'), 'is_active must not be sent: ' + body);
+            System.assertEquals(0, countCalls('POST /developer/v1/accounting/field-options'),
+                'A re-entering record must not be treated as a new option: ' + callLog);
+            System.assertEquals(RAMP_OPTION_PREFIX + 'reopened',
+                [SELECT Ramp_Field_Option_Id__c FROM AcctSeed__Accounting_Variable__c WHERE Id = :reopened.Id]
+                    .Ramp_Field_Option_Id__c,
+                'The record must stay linked to its original option');
         }
     }
 
